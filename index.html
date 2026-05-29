@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shadeward — See the sun on your flight</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <header>
+    <h1>Shadeward</h1>
+    <p class="tagline">See where the sun will be from your seat — pick the right window.</p>
+  </header>
+
+  <main>
+    <aside id="controls">
+      <h2>Your flight</h2>
+
+      <label>
+        From
+        <input id="from-airport" type="text" placeholder="LAX, JFK, LHR..." autocomplete="off" />
+        <ul id="from-suggestions" class="suggestions"></ul>
+      </label>
+
+      <label>
+        To
+        <input id="to-airport" type="text" placeholder="Destination..." autocomplete="off" />
+        <ul id="to-suggestions" class="suggestions"></ul>
+      </label>
+
+      <label>
+        Departure (local time at origin)
+        <input id="depart-time" type="datetime-local" />
+      </label>
+
+      <div id="summary" class="hidden">
+        <h3>Summary</h3>
+        <div id="summary-content"></div>
+      </div>
+    </aside>
+
+    <section id="viewport">
+      <div id="map-container"></div>
+      <div id="map-hud">
+        <span id="hud-time">—</span>
+        <span id="hud-sun"></span>
+      </div>
+    </section>
+  </main>
+
+  <footer id="timeline-container" class="hidden">
+    <div id="timeline-events"></div>
+    <input id="timeline-scrub" type="range" min="0" max="1000" value="0" step="1" />
+    <div id="timeline-labels">
+      <span id="timeline-start">—</span>
+      <button id="play-btn" aria-label="Play">▶</button>
+      <span id="timeline-end">—</span>
+    </div>
+  </footer>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
