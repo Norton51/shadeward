@@ -161,10 +161,56 @@ export const AIRPORTS = [
   ['PTY', 'Tocumen International', 'Panama City', 'PA', 9.0714, -79.3835],
 ];
 
-/**
- * Search airports by IATA code, city, or name (case-insensitive).
- * Prioritizes IATA exact match, then prefix matches, then substring matches.
- */
+// Live database — starts as the static fallback, replaced when OurAirports loads.
+let _db = AIRPORTS.map(ap => ({ iata: ap[0], name: ap[1], city: ap[2], country: ap[3], lat: ap[4], lon: ap[5] }));
+
+export async function initAirports() {
+  try {
+    const res = await fetch('https://davidmegginson.github.io/ourairports-data/airports.csv');
+    if (!res.ok) return;
+    const text = await res.text();
+    const parsed = parseOurAirportsCsv(text);
+    if (parsed.length > 100) _db = parsed;
+  } catch {
+    // keep static fallback
+  }
+}
+
+function parseOurAirportsCsv(text) {
+  const results = [];
+  const lines = text.split('\n');
+  for (let i = 1; i < lines.length; i++) {
+    const row = splitCsvRow(lines[i]);
+    if (row.length < 14) continue;
+    const type = row[2];
+    if (type !== 'large_airport' && type !== 'medium_airport') continue;
+    const iata = row[13].trim();
+    if (!iata || iata.length !== 3) continue;
+    const lat = parseFloat(row[4]);
+    const lon = parseFloat(row[5]);
+    if (isNaN(lat) || isNaN(lon)) continue;
+    const name    = row[3].trim();
+    const country = row[8].trim();
+    const city    = (row[10].trim() || name);
+    results.push({ iata, name, city, country, lat, lon });
+  }
+  return results;
+}
+
+function splitCsvRow(line) {
+  const fields = [];
+  let cur = '';
+  let inQuote = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') { inQuote = !inQuote; }
+    else if (ch === ',' && !inQuote) { fields.push(cur); cur = ''; }
+    else { cur += ch; }
+  }
+  fields.push(cur);
+  return fields;
+}
+
 export function searchAirports(query, limit = 8) {
   if (!query || query.length === 0) return [];
   const q = query.toLowerCase().trim();
@@ -172,11 +218,10 @@ export function searchAirports(query, limit = 8) {
   const results = [];
   const seen = new Set();
 
-  for (const ap of AIRPORTS) {
-    const [iata, name, city, country] = ap;
-    const iataL = iata.toLowerCase();
-    const cityL = city.toLowerCase();
-    const nameL = name.toLowerCase();
+  for (const ap of _db) {
+    const iataL = ap.iata.toLowerCase();
+    const cityL = ap.city.toLowerCase();
+    const nameL = ap.name.toLowerCase();
 
     let score = 0;
     if (iataL === q) score = 100;
@@ -188,9 +233,9 @@ export function searchAirports(query, limit = 8) {
     else if (nameL.includes(q)) score = 30;
     else if (iataL.includes(q)) score = 20;
 
-    if (score > 0 && !seen.has(iata)) {
-      seen.add(iata);
-      results.push({ iata, name, city, country, lat: ap[4], lon: ap[5], score });
+    if (score > 0 && !seen.has(ap.iata)) {
+      seen.add(ap.iata);
+      results.push({ ...ap, score });
     }
   }
 
@@ -200,7 +245,5 @@ export function searchAirports(query, limit = 8) {
 
 export function findByIata(iata) {
   const code = iata.toUpperCase();
-  const found = AIRPORTS.find(ap => ap[0] === code);
-  if (!found) return null;
-  return { iata: found[0], name: found[1], city: found[2], country: found[3], lat: found[4], lon: found[5] };
+  return _db.find(ap => ap.iata === code) ?? null;
 }

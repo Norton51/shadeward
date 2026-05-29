@@ -3,7 +3,10 @@ import { sunPositionAt, sunRelativeToCabin, findSolarEvents, findMoonEvents, rec
 import { MapView } from './mapview.js';
 import { Timeline } from './timeline.js';
 import { attachAirportAutocomplete } from './ui.js';
+import { initAirports } from './airports.js';
 import SunCalc from 'suncalc';
+
+initAirports();
 
 let fromAirport = null;
 let toAirport   = null;
@@ -20,14 +23,32 @@ attachAirportAutocomplete(fromInput, fromSugg, (ap) => {
   fromAirport = ap;
   mapView.setAirport('from', ap);
   updateEstimate();
+  clearSameAirportError();
   tryAutoCompute();
 });
 attachAirportAutocomplete(toInput, toSugg, (ap) => {
   toAirport = ap;
   mapView.setAirport('to', ap);
   updateEstimate();
+  clearSameAirportError();
   tryAutoCompute();
 });
+
+function clearSameAirportError() {
+  toInput.classList.remove('input-error');
+  const err = document.getElementById('same-airport-error');
+  if (err) err.remove();
+}
+
+function showSameAirportError() {
+  if (document.getElementById('same-airport-error')) return;
+  toInput.classList.add('input-error');
+  const msg = document.createElement('small');
+  msg.id = 'same-airport-error';
+  msg.textContent = 'Origin and destination cannot be the same.';
+  msg.style.color = 'var(--error)';
+  toInput.parentElement.appendChild(msg);
+}
 
 function updateEstimate() {
   if (fromAirport && toAirport) {
@@ -94,7 +115,7 @@ function onTimelineChange(state) {
 
 function tryAutoCompute() {
   if (!fromAirport || !toAirport) return;
-  if (fromAirport.iata === toAirport.iata) return;
+  if (fromAirport.iata === toAirport.iata) { showSameAirportError(); return; }
   const departLocalStr = departInput.value;
   if (!departLocalStr) return;
 

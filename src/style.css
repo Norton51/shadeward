@@ -9,6 +9,7 @@
   --accent-dim: #b8893a;
   --sun: #ffd166;
   --night: #1a2540;
+  --error: #ff6b6b;
 }
 
 * { box-sizing: border-box; }
@@ -340,4 +341,62 @@ main {
   font-family: ui-monospace, monospace;
   padding: 3px 7px;
   box-shadow: none;
+}
+
+.input-error {
+  border-color: var(--error) !important;
+}
+
+@media (max-width: 768px) {
+  body {
+    grid-template-rows: auto auto 1fr auto;
+    overflow: auto;
+  }
+
+  header {
+    padding: 10px 14px;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  header h1 { font-size: 17px; }
+  .tagline { font-size: 12px; }
+
+  main {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    min-height: 0;
+  }
+
+  #controls {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 14px;
+    max-height: 40vh;
+    overflow-y: auto;
+  }
+
+  #controls h2 { margin-bottom: 8px; }
+
+  #controls label { margin-bottom: 10px; }
+
+  #viewport {
+    min-height: 280px;
+  }
+
+  #map-hud {
+    font-size: 11px;
+    padding: 6px 8px;
+    gap: 8px;
+    top: 8px;
+    right: 8px;
+  }
+
+  #timeline-container {
+    padding: 8px 12px;
+  }
+
+  #timeline-labels {
+    font-size: 10px;
+  }
 }
