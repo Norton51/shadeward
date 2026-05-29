@@ -1,6 +1,10 @@
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { GestureHandling } from 'leaflet-gesture-handling';
+import 'leaflet-gesture-handling/dist/leaflet-gesture-handling.css';
 import SunCalc from 'suncalc';
+
+L.Map.addInitHook('addHandler', 'gestureHandling', GestureHandling);
 
 const RAD = Math.PI / 180;
 const DEG = 180 / Math.PI;
@@ -238,6 +242,7 @@ export class MapView {
       minZoom: 2,
       maxBounds: [[-85.06, -Infinity], [85.06, Infinity]],
       maxBoundsViscosity: 1.0,
+      gestureHandling: true,
     }).setView([20, 0], 2);
 
     L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
