@@ -24,6 +24,10 @@ npm test          # unit tests for the geometry, time-zone and analysis code
 npm run build     # static site in dist/
 ```
 
+### Map
+
+The map uses [MapLibre GL JS](https://maplibre.org/) with vector tiles from [OpenFreeMap](https://openfreemap.org/): no API key, no usage limits, and commercial use is allowed. Map data © OpenStreetMap contributors via OpenMapTiles. If the tile server can't be reached, the map falls back to a plain background so the route and day/night shading still work.
+
 ### Analytics
 
 `src/analytics.js` loads [Vercel Web Analytics](https://vercel.com/docs/analytics). It only collects data when deployed on Vercel with Web Analytics enabled for the project (Project → Analytics → Enable). The URL hash, which holds the flight, is stripped from reported URLs, and repeat page views from hash updates are dropped.
@@ -52,7 +56,7 @@ src/
 │   ├── flight.js      Flight simulation, cabin geometry, events, seat recommendation
 │   └── airports.js    Lazy airport index and search
 ├── ui/
-│   ├── mapview.js     Leaflet map: shading, route, aircraft, sun & moon
+│   ├── mapview.js     MapLibre map: shading, route, aircraft, sun & moon
 │   ├── timeline.js    Banded timeline, scrubber, playback
 │   ├── cabin.js       Sky-compass SVG
 │   ├── summary.js     Recommendation and flight details panel
@@ -72,7 +76,7 @@ src/
 
 **Which window.** The sun's direction is projected onto the window normal of each side: `cos(elevation) · sin(bearing from the nose)`. That gives 0 when the sun is overhead, ahead or behind, and 1 when it faces a row of windows squarely. Minutes above 0.25 count as "direct sun" on that side; the recommendation compares the integrated exposure of each side.
 
-**Night shading.** Each twilight threshold (0°, −6°, −12°, −18°) is a spherical cap; each is drawn by intersecting it with every meridian, which handles equinoxes and polar day/night without special cases.
+**Night shading.** Drawn as a raster: for each pixel of a world-sized canvas (Web Mercator rows), the sun's elevation is one multiply-add, so darkness can ramp smoothly from sunset to the end of astronomical twilight. Where it is dark and the moon is up, the shade is lifted and tinted. The canvas is redrawn as the timeline moves and MapLibre repeats it across world copies.
 
 ### Limitations
 

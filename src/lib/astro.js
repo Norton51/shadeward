@@ -52,7 +52,7 @@ const PHASES = [
 export function moonPhase(date) {
   const { phase, fraction } = SunCalc.getMoonIllumination(date);
   const [, name, glyph] = PHASES.find(([limit]) => phase < limit);
-  return { name, glyph, illumination: fraction };
+  return { name, glyph, phase, illumination: fraction };
 }
 
 /** Sky condition for a sun elevation, using the standard twilight thresholds. */

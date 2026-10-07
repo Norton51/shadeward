@@ -1,19 +1,27 @@
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
-import { GestureHandling } from 'leaflet-gesture-handling';
-import 'leaflet-gesture-handling/dist/leaflet-gesture-handling.css';
+import * as maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
+// MapLibre runs tile parsing in a module worker; let Vite bundle it and tell MapLibre where it is.
+import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import { RAD, DEG, normLon } from '../lib/geo.js';
 import { subsolarPoint, sublunarPoint, sunPosition, moonPosition, moonPhase, skyCondition, SKY_LABEL } from '../lib/astro.js';
 import { esc } from './dom.js';
 
-L.Map.addInitHook('addHandler', 'gestureHandling', GestureHandling);
+// OpenFreeMap: free vector tiles, no API key, no usage limits (https://openfreemap.org).
+maplibregl.setWorkerUrl(workerUrl);
 
-// Each overlay is drawn on three world copies so it survives panning across the antimeridian.
-const COPIES = [-360, 0, 360];
+const STYLE_URL = 'https://tiles.openfreemap.org/styles/positron';
+
+// Used if the basemap can't be fetched, so the route and day/night shading still render.
+const FALLBACK_STYLE = {
+  version: 8,
+  sources: {},
+  layers: [{ id: 'background', type: 'background', paint: { 'background-color': '#e9e5dc' } }],
+};
+
 const MAX_LAT = 85;
+const MERC_LAT = 85.0511; // latitude where Web Mercator's square world ends
 
-// Stacked shading: each threshold the sun is below darkens the map a little more.
-const SHADES = [-0.833, -6, -12, -18];
+// ── Day/night geometry ──────────────────────────────────────────────────────
 
 /**
  * Latitude interval [lo, hi] along meridian `lon` where the body overhead at
@@ -48,123 +56,312 @@ function latInterval(sub, lon, elevation, below) {
   return lo < hi ? [lo, hi] : null;
 }
 
-/** Leaflet multipolygon covering every meridian's interval between start and end longitudes. */
-function zone(intervalAt, start, end) {
-  const polys = [];
-  let top = [], bottom = [];
-  const flush = () => {
-    if (top.length > 1) polys.push([[...top, ...bottom.reverse()]]);
-    top = []; bottom = [];
-  };
-  for (let lon = start; lon <= end; lon += 1) {
-    const iv = intervalAt(lon);
-    if (!iv) { flush(); continue; }
-    top.push([iv[1], lon]);
-    bottom.push([iv[0], lon]);
+/**
+ * Paint day/night shading into an equirectangular-in-longitude, Mercator-in-latitude
+ * canvas covering the whole world. Darkness ramps from sunset (−0.833°) to the end of
+ * astronomical twilight (−18°); where it is dark and the moon is up, the shade is
+ * lifted and tinted to suggest moonlight.
+ */
+const SHADE_W = 1024;
+const SHADE_H = 680;
+const sinD = (d) => Math.sin(d * RAD);
+const S_SET = sinD(-0.833);
+const S_DARK = sinD(-18);
+const ROW_LAT = Array.from({ length: SHADE_H }, (_, r) => Math.atan(Math.sinh(Math.PI * (1 - (2 * (r + 0.5)) / SHADE_H))));
+const COL_LON = Array.from({ length: SHADE_W }, (_, c) => (-180 + (360 * (c + 0.5)) / SHADE_W) * RAD);
+
+function paintShade(ctx, img, sub, lunar, glow) {
+  const data = img.data;
+  const sδ = Math.sin(sub.lat * RAD), cδ = Math.cos(sub.lat * RAD);
+  const mδs = Math.sin(lunar.lat * RAD), mδc = Math.cos(lunar.lat * RAD);
+  const sunCos = COL_LON.map((λ) => Math.cos(λ - sub.lon * RAD));
+  const moonCos = COL_LON.map((λ) => Math.cos(λ - lunar.lon * RAD));
+  let i = 0;
+  for (let r = 0; r < SHADE_H; r++) {
+    const sφ = Math.sin(ROW_LAT[r]), cφ = Math.cos(ROW_LAT[r]);
+    const a = sφ * sδ, b = cφ * cδ, ma = sφ * mδs, mb = cφ * mδc;
+    for (let c = 0; c < SHADE_W; c++, i += 4) {
+      const sinEl = a + b * sunCos[c];
+      if (sinEl >= S_SET) { data[i + 3] = 0; continue; }
+      const t = Math.min(1, (S_SET - sinEl) / (S_SET - S_DARK));
+      let moon = 0;
+      if (glow && t > 0.4) {
+        const m = (ma + mb * moonCos[c]) * 4;
+        if (m > 0) moon = (glow * (m > 1 ? 1 : m) * (t - 0.4)) / 0.6;
+      }
+      data[i] = 13 + 110 * moon;
+      data[i + 1] = 27 + 120 * moon;
+      data[i + 2] = 61 + 150 * moon;
+      // A visible step at sunset, deepening through twilight.
+      data[i + 3] = (40 + 115 * t) * (1 - 0.3 * moon);
+    }
   }
-  flush();
-  return polys;
+  ctx.putImageData(img, 0, 0);
 }
 
-const intersect = (a, b) => {
-  if (!a || !b) return null;
-  const lo = Math.max(a[0], b[0]), hi = Math.min(a[1], b[1]);
-  return lo < hi ? [lo, hi] : null;
-};
+// ── GeoJSON helpers ─────────────────────────────────────────────────────────
+
+const collection = (features) => ({ type: 'FeatureCollection', features });
+const point = (lon, lat, properties = {}) => ({ type: 'Feature', properties, geometry: { type: 'Point', coordinates: [lon, lat] } });
+const line = (coords) => ({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } });
+const EMPTY = collection([]);
 
 const fmtLat = (v) => `${Math.abs(v).toFixed(1)}°${v >= 0 ? 'N' : 'S'}`;
 const fmtLon = (v) => `${Math.abs(normLon(v)).toFixed(1)}°${normLon(v) >= 0 ? 'E' : 'W'}`;
 
-function divIcon(html, size, className = '') {
-  return L.divIcon({ html, className: `map-icon ${className}`, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+// ── Icons (drawn to canvas so they render as map symbols on every world copy) ─
+
+const PIXEL_RATIO = 2;
+
+function canvasIcon(size, draw) {
+  const c = document.createElement('canvas');
+  c.width = c.height = size * PIXEL_RATIO;
+  const ctx = c.getContext('2d');
+  ctx.scale(PIXEL_RATIO, PIXEL_RATIO);
+  ctx.translate(size / 2, size / 2);
+  draw(ctx);
+  return ctx.getImageData(0, 0, c.width, c.height);
 }
 
-const PLANE_SVG = `<svg viewBox="-16 -16 32 32" width="30" height="30" aria-hidden="true">
-  <path d="M0-14c1.4 0 2 1.3 2 3v6.5l11 6.3v2.7L2 1v6.6l3.6 2.8v2.3L0 11.2l-5.6 1.5v-2.3L-2 7.6V1l-11 3.5V1.8l11-6.3V-11c0-1.7.6-3 2-3z"/></svg>`;
+const PLANE_PATH = 'M0-14c1.4 0 2 1.3 2 3v6.5l11 6.3v2.7L2 1v6.6l3.6 2.8v2.3L0 11.2l-5.6 1.5v-2.3L-2 7.6V1l-11 3.5V1.8l11-6.3V-11c0-1.7.6-3 2-3z';
+
+const planeIcon = () => canvasIcon(36, (ctx) => {
+  ctx.shadowColor = 'rgba(0,0,0,.35)';
+  ctx.shadowBlur = 4;
+  ctx.shadowOffsetY = 1;
+  const p = new Path2D(PLANE_PATH);
+  ctx.fillStyle = '#1c2230';
+  ctx.fill(p);
+  ctx.shadowColor = 'transparent';
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.2;
+  ctx.stroke(p);
+});
+
+const sunIcon = () => canvasIcon(30, (ctx) => {
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, 15);
+  g.addColorStop(0, '#ffd43b');
+  g.addColorStop(0.38, '#ffd43b');
+  g.addColorStop(0.4, 'rgba(255,212,59,.45)');
+  g.addColorStop(1, 'rgba(255,212,59,0)');
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(0, 0, 15, 0, Math.PI * 2);
+  ctx.fill();
+});
+
+/** Moon disc with the lit fraction drawn for `phase` (0 new → 0.5 full → 1 new), as seen from the north. */
+const moonIcon = (phase) => canvasIcon(24, (ctx) => {
+  const r = 8;
+  ctx.shadowColor = 'rgba(140,160,230,.9)';
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = '#4a5370';
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowColor = 'transparent';
+
+  let p = phase;
+  if (p > 0.5) { ctx.scale(-1, 1); p = 1 - p; } // waning: mirror so the lit limb is on the left
+  const rx = r * Math.abs(Math.cos(2 * Math.PI * p));
+  ctx.fillStyle = '#f1f3fb';
+  ctx.beginPath();
+  ctx.arc(0, 0, r, -Math.PI / 2, Math.PI / 2);                     // lit limb, top → right → bottom
+  ctx.ellipse(0, 0, rx, r, 0, Math.PI / 2, -Math.PI / 2, p < 0.25); // terminator back to the top
+  ctx.fill();
+});
+
+// ── Map ─────────────────────────────────────────────────────────────────────
 
 export class MapView {
   /** @param overlays elements floating over the map that a fitted route should avoid */
   constructor(el, overlays = []) {
     this.el = el;
     this.overlays = overlays;
-    this.map = L.map(el, {
-      worldCopyJump: true,
-      minZoom: 2,
-      maxBounds: [[-MAX_LAT, -Infinity], [MAX_LAT, Infinity]],
-      maxBoundsViscosity: 1,
-      gestureHandling: true,
-      zoomControl: false,
-      attributionControl: true,
-    }).setView([25, 0], 2);
-    L.control.zoom({ position: 'bottomright' }).addTo(this.map);
-    this.map.attributionControl.setPrefix(false);
-
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-      subdomains: 'abcd',
-      maxZoom: 12,
-      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · © <a href="https://carto.com/attributions">CARTO</a>',
-    }).addTo(this.map);
-
-    const pane = (name, z) => { this.map.createPane(name).style.zIndex = z; return name; };
-    const shadePane = pane('shade', 350);
-    const routePane = pane('route', 450);
-
-    this.shades = SHADES.map(() => L.polygon([], { pane: shadePane, stroke: false, fillColor: '#0d1b3d', fillOpacity: 0.13, interactive: false }).addTo(this.map));
-    this.moonlit = L.polygon([], { pane: shadePane, stroke: false, fillColor: '#b9c8ff', fillOpacity: 0, interactive: false }).addTo(this.map);
-    this.terminator = L.polyline([], { pane: shadePane, color: '#f2a93b', weight: 1.25, opacity: 0.8, interactive: false }).addTo(this.map);
-
-    this.flown = COPIES.map(() => L.polyline([], { pane: routePane, color: '#e8590c', weight: 3, opacity: 0.95, interactive: false }).addTo(this.map));
-    this.ahead = COPIES.map(() => L.polyline([], { pane: routePane, color: '#e8590c', weight: 2, opacity: 0.7, dashArray: '2 6', lineCap: 'round', interactive: false }).addTo(this.map));
-
-    this.sun = COPIES.map(() => L.marker([0, 0], { icon: divIcon('<span class="sun-dot"></span>', 26, 'sun-icon'), keyboard: false, interactive: false, zIndexOffset: 200 }).addTo(this.map));
-    this.moon = COPIES.map(() => L.marker([0, 0], { icon: divIcon('', 22, 'moon-icon'), keyboard: false, interactive: false, zIndexOffset: 200 }).addTo(this.map));
-    this.airports = [];
-    this.planes = [];
-
-    this.center = 0;
+    this.ready = false;
     this.samples = null;
+    this.state = null;
     this.utc = new Date();
-    this.map.on('click', (e) => this._explain(e.latlng));
-    this.setTime(new Date());
+    this.airports = { from: null, to: null };
+    this.moonKey = '';
+    this.shadeCanvas = Object.assign(document.createElement('canvas'), { width: SHADE_W, height: SHADE_H });
+    this.shadeCtx = this.shadeCanvas.getContext('2d', { willReadFrequently: false });
+    this.shadeImg = this.shadeCtx.createImageData(SHADE_W, SHADE_H);
+
+    this.map = new maplibregl.Map({
+      container: el,
+      style: STYLE_URL,
+      center: [0, 25],
+      zoom: 1,
+      minZoom: 0.5,
+      maxZoom: 12,
+      renderWorldCopies: true,
+      dragRotate: false,
+      pitchWithRotate: false,
+      // On touch screens, one finger scrolls the page and two fingers move the map.
+      cooperativeGestures: matchMedia('(pointer: coarse)').matches,
+      attributionControl: { compact: true },
+    });
+    this.map.touchZoomRotate.disableRotation();
+    this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+    this.map.on('style.load', () => this._init());
+    this.map.on('error', (e) => {
+      if (this.ready || this.fellBack) return console.error('Map error:', e.error?.message ?? e);
+      console.warn('Basemap unavailable, continuing without it:', e.error?.message ?? e);
+      this.fellBack = true;
+      this.map.setStyle(FALLBACK_STYLE, { diff: false });
+    });
+    this.map.on('click', (e) => this._click(e));
   }
 
   setAirports(from, to) {
-    for (const m of this.airports) m.remove();
-    this.airports = [];
-    for (const [a, role] of [[from, 'Departure'], [to, 'Arrival']]) {
-      if (!a) continue;
-      const lon = this._near(a.lon);
-      for (const off of COPIES) {
-        this.airports.push(L.marker([a.lat, lon + off], {
-          icon: L.divIcon({ html: `<span class="ap-dot"></span><span class="ap-code">${esc(a.iata)}</span>`, className: 'map-icon ap-icon', iconSize: [12, 12], iconAnchor: [6, 6] }),
-          title: `${a.iata} – ${a.name}`,
-          zIndexOffset: 300,
-        }).bindPopup(`<strong>${esc(a.iata)}</strong> · ${role}<br>${esc(a.name)}<br><span class="muted">${esc(a.city)}, ${esc(a.countryName)} · ${fmtLat(a.lat)} ${fmtLon(a.lon)}</span>`)
-          .addTo(this.map));
-      }
-    }
+    this.airports = { from, to };
+    if (this.ready) this._drawAirports();
     if (from && to) {
-      this.map.fitBounds(L.latLngBounds([from.lat, this._near(from.lon)], [to.lat, this._near(to.lon)]), { padding: [60, 60] });
+      const toLon = from.lon + normLon(to.lon - from.lon);
+      this._fit([[from.lon, from.lat], [toLon, to.lat]], 5);
     } else if (from || to) {
       const a = from || to;
-      this.map.setView([a.lat, a.lon], Math.max(this.map.getZoom(), 4));
+      this.map.easeTo({ center: [a.lon, a.lat], zoom: Math.max(this.map.getZoom(), 3.5) });
     }
   }
 
   /** samples: analyzed flight samples (unwrapped longitudes), or null to clear the route. */
   setFlight(samples) {
     this.samples = samples;
-    for (const p of this.planes) p.remove();
-    this.planes = [];
+    this.state = null;
+    if (this.ready) this._drawRoute();
+    if (samples) this._fit(samples.map((s) => [s.lon, s.lat]), 6);
+  }
+
+  /** Redraw time-dependent layers; `state` is the aircraft state at `utc`, if a flight is loaded. */
+  setTime(utc, state) {
+    this.utc = utc;
+    this.state = state ?? null;
+    if (this.ready) { this._drawSky(); this._drawRoute(); }
+  }
+
+  invalidate() { this.map.resize(); }
+
+  _init() {
+    if (this.ready) return;
+    const map = this.map;
+    map.addImage('plane', planeIcon(), { pixelRatio: PIXEL_RATIO });
+    map.addImage('sun', sunIcon(), { pixelRatio: PIXEL_RATIO });
+
+    for (const id of ['terminator', 'sky-bodies', 'flown', 'ahead', 'plane', 'airports']) {
+      map.addSource(id, { type: 'geojson', data: EMPTY });
+    }
+
+    // Shading sits under the basemap's labels so place names stay legible at night.
+    const firstLabel = map.getStyle().layers.find((l) => l.type === 'symbol')?.id;
+    map.addSource('shade', {
+      type: 'canvas',
+      canvas: this.shadeCanvas,
+      animate: false,
+      coordinates: [[-180, MERC_LAT], [180, MERC_LAT], [180, -MERC_LAT], [-180, -MERC_LAT]],
+    });
+    map.addLayer({ id: 'shade', type: 'raster', source: 'shade', paint: { 'raster-fade-duration': 0, 'raster-resampling': 'linear' } }, firstLabel);
+    map.addLayer({ id: 'terminator', type: 'line', source: 'terminator', paint: { 'line-color': '#f2a93b', 'line-width': 1.25, 'line-opacity': 0.8 } }, firstLabel);
+
+    map.addLayer({ id: 'flown', type: 'line', source: 'flown', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#e8590c', 'line-width': 3 } });
+    map.addLayer({ id: 'ahead', type: 'line', source: 'ahead', layout: { 'line-cap': 'round' }, paint: { 'line-color': '#e8590c', 'line-width': 2, 'line-opacity': 0.75, 'line-dasharray': [0.1, 3] } });
+    map.addLayer({ id: 'sky-bodies', type: 'symbol', source: 'sky-bodies', layout: { 'icon-image': ['get', 'icon'], 'icon-allow-overlap': true, 'icon-ignore-placement': true }, paint: { 'icon-opacity': ['get', 'opacity'] } });
+    map.addLayer({ id: 'airport-dots', type: 'circle', source: 'airports', paint: { 'circle-radius': 5, 'circle-color': '#fff', 'circle-stroke-color': '#e8590c', 'circle-stroke-width': 3 } });
+    // Labels need the basemap's fonts, which the fallback style doesn't have.
+    if (map.getStyle().glyphs) map.addLayer({
+      id: 'airport-codes', type: 'symbol', source: 'airports',
+      layout: { 'text-field': ['get', 'iata'], 'text-font': ['Noto Sans Bold'], 'text-size': 12, 'text-anchor': 'left', 'text-offset': [0.9, 0], 'text-allow-overlap': true },
+      paint: { 'text-color': '#1c2230', 'text-halo-color': '#fff', 'text-halo-width': 1.5 },
+    });
+    map.addLayer({ id: 'plane', type: 'symbol', source: 'plane', layout: { 'icon-image': 'plane', 'icon-rotate': ['get', 'heading'], 'icon-rotation-alignment': 'map', 'icon-allow-overlap': true, 'icon-ignore-placement': true } });
+
+    map.on('mouseenter', 'airport-dots', () => { map.getCanvas().style.cursor = 'pointer'; });
+    map.on('mouseleave', 'airport-dots', () => { map.getCanvas().style.cursor = ''; });
+
+    this.ready = true;
+    this._drawAirports();
+    this._drawSky();
+    this._drawRoute();
+  }
+
+  _drawAirports() {
+    const { from, to } = this.airports;
+    const features = [];
+    if (from) features.push(point(from.lon, from.lat, { ...from, role: 'Departure' }));
+    if (to) features.push(point(to.lon, to.lat, { ...to, role: 'Arrival' }));
+    this.map.getSource('airports').setData(collection(features));
+  }
+
+  _drawSky() {
+    const utc = this.utc;
+    const sub = subsolarPoint(utc);
+    const lunar = sublunarPoint(utc);
+
+    const terminator = [];
+    for (let lon = -180; lon <= 180; lon += 1) {
+      const iv = latInterval(sub, lon, -0.833, true);
+      if (iv) terminator.push([lon, sub.lat > 0 ? iv[1] : iv[0]]);
+    }
+    this.map.getSource('terminator').setData(line(terminator));
+
+    const phase = moonPhase(utc);
+    const glow = Math.max(0, (phase.illumination - 0.25) / 0.75);
+    paintShade(this.shadeCtx, this.shadeImg, sub, lunar, glow);
+    this._refreshShade();
+
+    // Redraw the moon icon only when its shape visibly changes.
+    const key = phase.phase.toFixed(2);
+    if (key !== this.moonKey) {
+      const img = moonIcon(phase.phase);
+      if (this.map.hasImage('moon')) this.map.updateImage('moon', img);
+      else this.map.addImage('moon', img, { pixelRatio: PIXEL_RATIO });
+      this.moonKey = key;
+    }
+    this.map.getSource('sky-bodies').setData(collection([
+      point(sub.lon, sub.lat, { icon: 'sun', opacity: 1 }),
+      point(lunar.lon, lunar.lat, { icon: 'moon', opacity: 0.5 + 0.5 * phase.illumination }),
+    ]));
+  }
+
+  /** A paused canvas source only re-reads its canvas while playing; play for a couple of frames. */
+  _refreshShade() {
+    const src = this.map.getSource('shade');
+    src.play();
+    cancelAnimationFrame(this.shadePause);
+    this.shadePause = requestAnimationFrame(() => {
+      this.shadePause = requestAnimationFrame(() => src.pause());
+    });
+  }
+
+  _drawRoute() {
+    const samples = this.samples;
+    const s = this.state;
     if (!samples) {
-      for (const l of [...this.flown, ...this.ahead]) l.setLatLngs([]);
+      for (const id of ['flown', 'ahead', 'plane']) this.map.getSource(id).setData(EMPTY);
       return;
     }
-    const lons = samples.map((s) => s.lon);
-    this.center = (Math.min(...lons) + Math.max(...lons)) / 2;
-    this.planes = COPIES.map(() => L.marker([0, 0], { icon: divIcon(PLANE_SVG, 30, 'plane-icon'), interactive: false, keyboard: false, zIndexOffset: 1000 }).addTo(this.map));
-    const bounds = L.latLngBounds(samples.map((s) => [s.lat, s.lon]));
-    this.map.fitBounds(bounds, { ...this._fitPadding(), maxZoom: 6 });
+    const coords = samples.map((x) => [x.lon, x.lat]);
+    if (!s) {
+      this.map.getSource('flown').setData(EMPTY);
+      this.map.getSource('ahead').setData(line(coords));
+      this.map.getSource('plane').setData(EMPTY);
+      return;
+    }
+    const idx = samples.findIndex((x) => x.t > s.t);
+    const cut = idx < 0 ? samples.length : idx;
+    const here = [s.lon, s.lat];
+    this.map.getSource('flown').setData(line([...coords.slice(0, cut), here]));
+    this.map.getSource('ahead').setData(line([here, ...coords.slice(cut)]));
+    this.map.getSource('plane').setData(collection([point(s.lon, s.lat, { heading: s.heading })]));
+  }
+
+  /** Fit coordinates (longitudes may run past ±180) clear of the overlays. */
+  _fit(coords, maxZoom) {
+    const lons = coords.map((c) => c[0]);
+    const lats = coords.map((c) => c[1]);
+    const bounds = [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]];
+    this.map.fitBounds(bounds, { padding: this._fitPadding(), maxZoom, duration: 600 });
   }
 
   /** Padding that keeps a fitted route clear of the overlays docked along the map's edges. */
@@ -183,74 +380,28 @@ export class MapView {
       const span = edge === 'top' || edge === 'bottom' ? box.height : box.width;
       if (depth < span * 0.45) pad[edge] = Math.max(pad[edge], depth + 16);
     }
-    return { paddingTopLeft: [pad.left, pad.top], paddingBottomRight: [pad.right, pad.bottom] };
+    return pad;
   }
 
-  /** Redraw time-dependent layers; `state` is the aircraft state at `utc`, if a flight is loaded. */
-  setTime(utc, state) {
-    this.utc = utc;
-    const sub = subsolarPoint(utc);
-    const lunar = sublunarPoint(utc);
-    const start = Math.round(this.center) - 540;
-    const end = Math.round(this.center) + 540;
-
-    SHADES.forEach((elev, i) => this.shades[i].setLatLngs(zone((lon) => latInterval(sub, lon, elev, true), start, end)));
-
-    const terminator = [];
-    for (let lon = start; lon <= end; lon += 1) {
-      const iv = latInterval(sub, lon, -0.833, true);
-      if (iv) terminator.push([sub.lat > 0 ? iv[1] : iv[0], lon]);
+  _click(e) {
+    const airport = this.ready && this.map.queryRenderedFeatures(e.point, { layers: ['airport-dots'] })[0];
+    let html;
+    if (airport) {
+      const a = airport.properties;
+      html = `<strong>${esc(a.iata)}</strong> · ${esc(a.role)}<br>${esc(a.name)}<br><span class="muted">${esc(a.city)}, ${esc(a.countryName)} · ${fmtLat(+a.lat)} ${fmtLon(+a.lon)}</span>`;
+    } else {
+      const lat = e.lngLat.lat;
+      const lon = normLon(e.lngLat.lng);
+      const sun = sunPosition(this.utc, lat, lon);
+      const sky = skyCondition(sun.elevation);
+      html = `<strong>${SKY_LABEL[sky]}</strong><br>Sun ${Math.round(sun.elevation)}° ${sun.elevation >= 0 ? 'above' : 'below'} the horizon`;
+      if (sky !== 'day') {
+        const moon = moonPosition(this.utc, lat, lon);
+        const phase = moonPhase(this.utc);
+        html += `<br><span class="muted">${phase.glyph} ${phase.name}, ${Math.round(phase.illumination * 100)}% lit · ${moon.elevation > 0 ? `${Math.round(moon.elevation)}° up` : 'below the horizon'}</span>`;
+      }
+      html += `<br><span class="muted">${fmtLat(lat)} ${fmtLon(lon)}</span>`;
     }
-    this.terminator.setLatLngs(terminator);
-
-    const phase = moonPhase(utc);
-    const glow = Math.max(0, (phase.illumination - 0.25) / 0.75);
-    this.moonlit.setLatLngs(glow ? zone((lon) => intersect(latInterval(sub, lon, -12, true), latInterval(lunar, lon, 0, false)), start, end) : []);
-    this.moonlit.setStyle({ fillOpacity: glow * 0.16 });
-
-    const moonKey = `${phase.glyph}${(0.45 + 0.55 * phase.illumination).toFixed(1)}`;
-    const moonIcon = moonKey !== this.moonKey && divIcon(`<span class="moon-glyph" style="opacity:${moonKey.slice(-3)}">${phase.glyph}</span>`, 22, 'moon-icon');
-    this.moonKey = moonKey;
-    COPIES.forEach((off, i) => {
-      this.sun[i].setLatLng([sub.lat, this._near(sub.lon) + off]);
-      this.moon[i].setLatLng([lunar.lat, this._near(lunar.lon) + off]);
-      if (moonIcon) this.moon[i].setIcon(moonIcon);
-    });
-
-    if (state && this.samples) {
-      const idx = this.samples.findIndex((s) => s.t > state.t);
-      const cut = idx < 0 ? this.samples.length : idx;
-      const here = [state.lat, state.lon];
-      const flown = [...this.samples.slice(0, cut).map((s) => [s.lat, s.lon]), here];
-      const ahead = [here, ...this.samples.slice(cut).map((s) => [s.lat, s.lon])];
-      COPIES.forEach((off, i) => {
-        this.flown[i].setLatLngs(flown.map(([a, b]) => [a, b + off]));
-        this.ahead[i].setLatLngs(ahead.map(([a, b]) => [a, b + off]));
-        this.planes[i].setLatLng([state.lat, state.lon + off]);
-        const svg = this.planes[i].getElement()?.querySelector('svg');
-        if (svg) svg.style.transform = `rotate(${state.heading}deg)`;
-      });
-    }
-  }
-
-  invalidate() { this.map.invalidateSize(); }
-
-  /** Longitude shifted by whole turns to sit nearest the current map centre longitude. */
-  _near(lon) {
-    return this.center + normLon(lon - this.center);
-  }
-
-  _explain(latlng) {
-    const lon = normLon(latlng.lng);
-    const sun = sunPosition(this.utc, latlng.lat, lon);
-    const sky = skyCondition(sun.elevation);
-    let html = `<strong>${SKY_LABEL[sky]}</strong><br>Sun ${Math.round(sun.elevation)}° ${sun.elevation >= 0 ? 'above' : 'below'} the horizon`;
-    if (sky !== 'day') {
-      const moon = moonPosition(this.utc, latlng.lat, lon);
-      const phase = moonPhase(this.utc);
-      html += `<br><span class="muted">${phase.glyph} ${phase.name}, ${Math.round(phase.illumination * 100)}% lit · ${moon.elevation > 0 ? `${Math.round(moon.elevation)}° up` : 'below the horizon'}</span>`;
-    }
-    html += `<br><span class="muted">${fmtLat(latlng.lat)} ${fmtLon(lon)}</span>`;
-    L.popup({ className: 'sky-popup' }).setLatLng(latlng).setContent(html).openOn(this.map);
+    new maplibregl.Popup({ className: 'sky-popup', maxWidth: '260px' }).setLngLat(e.lngLat).setHTML(html).addTo(this.map);
   }
 }
