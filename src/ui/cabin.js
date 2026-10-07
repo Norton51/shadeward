@@ -30,8 +30,8 @@ export function renderCabinCompass(svg) {
   return (state) => {
     const { sun: pos, cabin } = state;
     // Elevation maps linearly from horizon (ring) to zenith (centre); below the
-    // horizon the sun is parked just outside the ring.
-    const r = pos.elevation >= 0 ? R * (1 - pos.elevation / 90) : R + 8;
+    // horizon the sun eases out to just beyond the ring.
+    const r = pos.elevation >= 0 ? R * (1 - pos.elevation / 90) : R + Math.min(8, -pos.elevation * 1.6);
     const a = (cabin.relative * Math.PI) / 180;
     const x = r * Math.sin(a);
     const y = -r * Math.cos(a);

@@ -240,7 +240,9 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .cc-plane { fill: var(--surface); stroke: var(--muted); stroke-width: 1.2; stroke-linejoin: round; }
 .cc-win rect { fill: color-mix(in srgb, var(--sun) calc(var(--glare, 0) * 100%), color-mix(in srgb, var(--muted) 40%, var(--surface))); }
 .cc-ray { stroke: var(--sun); stroke-width: 1.5; stroke-dasharray: 3 3; opacity: .7; }
+.cc-ray { transition: opacity .4s; }
 .cc-ray.is-down { opacity: 0; }
+.cc-sun circle { transition: fill .5s, stroke .5s; }
 .cc-sun circle:first-child { fill: var(--sun); }
 .cc-sun-halo { fill: none; stroke: var(--sun); stroke-opacity: .35; stroke-width: 4; }
 .cc-sun { transition: transform .12s linear; }

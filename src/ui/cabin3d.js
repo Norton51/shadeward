@@ -13,7 +13,7 @@ import {
   BufferGeometry, Float32BufferAttribute, PlaneGeometry, BoxGeometry, Shape, ExtrudeGeometry,
   Mesh, InstancedMesh, MeshStandardMaterial, MeshBasicMaterial,
   DirectionalLight, HemisphereLight, Points, PointsMaterial, PMREMGenerator, CanvasTexture, RepeatWrapping,
-  DoubleSide, PCFSoftShadowMap, SRGBColorSpace, ACESFilmicToneMapping,
+  SphereGeometry, BackSide, DoubleSide, PCFSoftShadowMap, SRGBColorSpace, ACESFilmicToneMapping,
 } from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
@@ -24,6 +24,12 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 const RAD = Math.PI / 180;
+
+/** 0 at edge0, 1 at edge1, eased; works with edge0 > edge1 for falling ramps. */
+function smoothstep(edge0, edge1, x) {
+  const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
 
 // ── Cabin dimensions (single-aisle airliner) ────────────────────────────────
 const HALF_L = 9;                 // modelled length either side of the viewer
@@ -352,6 +358,15 @@ export function createCabinView(container) {
   u.cloudCoverage.value = 0;
   scene.add(sky);
 
+  // The Preetham model goes black a few degrees below the horizon. A dome just
+  // inside the sky fades in a night colour over it, so dusk never jumps.
+  const nightDome = new Mesh(
+    new SphereGeometry(21000, 32, 16),
+    new MeshBasicMaterial({ color: '#121a30', side: BackSide, transparent: true, opacity: 0, depthWrite: false, fog: false }),
+  );
+  nightDome.renderOrder = 1;
+  scene.add(nightDome);
+
   const clouds = new Mesh(new PlaneGeometry(60000, 60000), new MeshBasicMaterial({ map: cloudTexture() }));
   clouds.rotation.x = -Math.PI / 2;
   clouds.position.y = -900;
@@ -365,7 +380,8 @@ export function createCabinView(container) {
   }
   const starGeo = new BufferGeometry();
   starGeo.setAttribute('position', new Float32BufferAttribute(starPos, 3));
-  const stars = new Points(starGeo, new PointsMaterial({ color: '#dfe6ff', size: 1.3, sizeAttenuation: false, fog: false, transparent: true }));
+  const stars = new Points(starGeo, new PointsMaterial({ color: '#dfe6ff', size: 1.3, sizeAttenuation: false, fog: false, transparent: true, depthWrite: false }));
+  stars.renderOrder = 2;
   scene.add(stars);
 
   const hemi = new HemisphereLight('#eef2fa', '#d8d2c6', 0.35);
@@ -415,6 +431,7 @@ export function createCabinView(container) {
   const sunDay = C('#fff5e6'), sunGold = C('#ffb36b');
   const cloudDay = C('#ffffff'), cloudGold = C('#ffc9a0'), cloudNight = C('#0c1120');
   const fogDay = C('#c9dcf0'), fogGold = C('#e9b796'), fogNight = C('#121a30');
+  const cabinDay = C('#eef2fa'), cabinNight = C('#ffd9ae');
   let last = null;
 
   return {
@@ -435,26 +452,29 @@ export function createCabinView(container) {
       dir.set(-Math.sin(r) * Math.cos(e), Math.sin(e), Math.cos(r) * Math.cos(e));
 
       u.sunPosition.value.copy(dir);
-      // The Preetham sky goes black a few degrees below the horizon; fade to a night colour instead.
-      sky.visible = el > -7;
-      scene.background = sky.visible ? null : fogNight;
-      stars.visible = el < -5;
-      stars.material.opacity = Math.min(1, (-el - 5) / 7);
 
-      const golden = Math.min(1, Math.max(0, (14 - el) / 14));
-      const night = Math.min(1, Math.max(0, -el / 6)) ** 0.5;
-      clouds.material.color.copy(cloudDay).lerp(cloudGold, golden * (1 - night)).lerp(cloudNight, night);
-      scene.fog.color.copy(fogDay).lerp(fogGold, golden * (1 - night)).lerp(fogNight, night);
+      // Every day/night quantity is a smooth ramp of elevation so dusk and dawn
+      // blend continuously while the timeline plays.
+      const dark = smoothstep(1, -8, el);          // 0 in daylight → 1 once the sky is dark
+      const golden = smoothstep(16, 0, el) * (1 - dark);
+      nightDome.material.opacity = smoothstep(-1, -9, el);
+      stars.material.opacity = smoothstep(-4, -11, el);
+      stars.visible = stars.material.opacity > 0;
 
-      sun.visible = cabin.visible;
+      clouds.material.color.copy(cloudDay).lerp(cloudGold, golden).lerp(cloudNight, dark);
+      scene.fog.color.copy(fogDay).lerp(fogGold, golden).lerp(fogNight, dark);
+
+      // Sunlight fades in over the last few degrees above the (dipped) horizon at altitude.
+      const sunUp = smoothstep(state.horizon - 0.2, state.horizon + 4, el);
+      sun.visible = sunUp > 0;
       sun.position.copy(dir).multiplyScalar(30).add(sun.target.position);
-      sun.color.copy(sunDay).lerp(sunGold, golden);
-      sun.intensity = 11 * Math.min(1, 0.3 + Math.max(0, el + 3) / 10);
+      sun.color.copy(sunDay).lerp(sunGold, smoothstep(16, 0, el));
+      sun.intensity = 11 * sunUp * (0.55 + 0.45 * smoothstep(2, 15, el));
 
-      // Daylight-balanced cabin by day, warm mood lighting at night.
-      hemi.color.set(cabin.visible ? '#eef2fa' : '#ffd9ae');
-      hemi.intensity = cabin.visible ? 0.35 : 0.22;
-      scene.environmentIntensity = cabin.visible ? 0.3 : 0.12;
+      // Daylight-balanced cabin by day, easing into warm mood lighting at night.
+      hemi.color.copy(cabinDay).lerp(cabinNight, dark);
+      hemi.intensity = 0.35 - 0.13 * dark;
+      scene.environmentIntensity = 0.3 - 0.18 * dark;
 
       draw();
     },
