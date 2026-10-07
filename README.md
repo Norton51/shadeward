@@ -1,93 +1,95 @@
-# SunFlight
+# Shadeward
 
-See where the sun will be from your seat on a flight. A better version of the (now-defunct) shadeward.org.
+Find out which side of the plane gets the sun on your flight — and where to sit for shade, or for the sunset.
 
 ## What it does
 
-- Pick origin and destination airports
-- Pick a departure time and flight duration
-- Computes the great-circle flight path and aircraft heading at every minute
-- Calculates sun position (azimuth + elevation) at every point of the flight
-- Transforms sun position into cabin-relative coordinates (left/right window, ahead/behind)
-- Renders a 3D cabin POV: stylized cabin interior, window cutouts, sun moving through the sky outside the window as you scrub through the flight
-- Sunrise/sunset events marked on the timeline
-- Recommends which side of the plane to sit on
+- Pick an origin and destination (≈3,300 airports with scheduled service), a departure time in the origin's local time, and optionally override the estimated flight time.
+- Simulates the great-circle route minute by minute: aircraft position, heading, altitude, and the sun and moon relative to the cabin.
+- Recommends a side for shade, or explains why it doesn't matter (dark flight, sun high or fore/aft, sun splits evenly).
+- Lists sunrise, sunset, moonrise and moonset along the way, with the side of the aircraft they're visible from.
+- An interactive map with day/twilight/night shading, the subsolar and sublunar points, and the aircraft on its route.
+- A cabin "sky compass" showing where the sun sits around the aircraft and which windows it reaches.
+- A timeline coloured by where the sun is, with scrubbing, playback and clickable events.
+- The URL encodes the flight (`#from=LAX&to=JFK&dep=2026-10-07T08:00&dur=320`) so a result can be shared. `dep` may also be just `HH:MM` (today).
 
-## Tech stack
-
-- **Vite** for dev server + build
-- **Three.js** for the 3D cabin scene (custom shaders for sky + ground, procedural cabin geometry)
-- **SunCalc** for solar position math
-- **Vanilla JS** otherwise. No framework needed for a single-page tool.
-
-## Local dev
+## Development
 
 ```bash
 npm install
-npm run dev
+npm run dev       # http://localhost:5173
+npm test          # unit tests for the geometry, time-zone and analysis code
+npm run build     # static site in dist/
 ```
 
-Opens at http://localhost:5173.
+### Airport data
 
-## Build
+`src/data/airports.json` is generated from [OurAirports](https://ourairports.com/data/) (public domain) and committed. Each row is `[iata, name, city, country, lat, lon, ianaTimeZone]`; the time zone is resolved at build time with `tz-lookup`. To refresh it:
 
 ```bash
-npm run build
+npm run airports                       # downloads the CSV
+npm run airports -- path/to/airports.csv
 ```
 
-Outputs static files to `dist/` ready to deploy on Cloudflare Pages, Vercel, Netlify, GitHub Pages, etc.
+The dataset is code-split and loaded on first use (~105 kB gzipped).
 
 ## Architecture
 
 ```
 src/
-├── main.js       Entry point, wires everything together
-├── flight.js     Great-circle math, geodesic interpolation, heading
-├── sun.js        SunCalc wrapper + cabin-relative transformation + solar event detection
-├── scene.js      Three.js scene (cabin geometry, sky shader, sun, ground)
-├── timeline.js   Scrubber + auto-play controller
-├── ui.js         Airport autocomplete dropdown
-├── airports.js   Starter airport dataset (~150 major airports)
-└── style.css     Dark aviation aesthetic
+├── main.js            App controller: form state, URL hash, wiring
+├── lib/               Pure logic (no DOM), covered by test/
+│   ├── geo.js         Great-circle route, distance, bearing
+│   ├── astro.js       Sun/moon positions (SunCalc), subsolar/sublunar points, moon phase
+│   ├── time.js        IANA time-zone conversion and formatting via Intl
+│   ├── flight.js      Flight simulation, cabin geometry, events, seat recommendation
+│   └── airports.js    Lazy airport index and search
+├── ui/
+│   ├── mapview.js     Leaflet map: shading, route, aircraft, sun & moon
+│   ├── timeline.js    Banded timeline, scrubber, playback
+│   ├── cabin.js       Sky-compass SVG
+│   ├── summary.js     Recommendation and flight details panel
+│   ├── autocomplete.js  ARIA combobox for airports
+│   └── dom.js         Small DOM/escaping helpers
+├── data/airports.json Generated airport dataset
+└── style.css
 ```
 
-### Coordinate conventions
+## The model
 
-In the 3D scene:
-- `+Z` = forward (aircraft nose direction)
-- `+X` = right wing (out the right window)
-- `+Y` = up
-- Sun azimuth in scene = angle from `+Z` clockwise (viewed from above), so `+90°` puts the sun out the right window.
+**Route.** A great circle on a spherical Earth, sampled every minute. Heading comes from a finite difference along the route, so it stays well-defined at both ends. Longitudes are unwrapped so trans-Pacific routes draw continuously.
 
-### Adding a detailed cabin model (v2)
+**Timing.** The departure time is interpreted in the origin airport's real time zone (DST included). Flight time defaults to 30 min plus distance at 840 km/h, rounded to 5 min; it can be overridden.
 
-`scene.js` has `_buildCabin()`. To replace with a GLTF model:
+**Altitude and horizon.** A simple climb/cruise/descent profile to 11,000 m. From cruise altitude the horizon sits about 3° below level, so the sun is treated as up until it drops below that dip — sunsets in the air happen later than on the ground below.
 
-1. Add `GLTFLoader` import.
-2. Load the model in the constructor, position so the passenger's eye (camera) is at a window seat.
-3. Make sure the model's forward axis matches the scene convention (+Z forward).
+**Which window.** The sun's direction is projected onto the window normal of each side: `cos(elevation) · sin(bearing from the nose)`. That gives 0 when the sun is overhead, ahead or behind, and 1 when it faces a row of windows squarely. Minutes above 0.25 count as "direct sun" on that side; the recommendation compares the integrated exposure of each side.
 
-The sun, sky, ground, and lighting code doesn't change.
+**Night shading.** Each twilight threshold (0°, −6°, −12°, −18°) is a spherical cap; each is drawn by intersecting it with every meridian, which handles equinoxes and polar day/night without special cases.
 
-### Replacing the airport dataset
+### Limitations
 
-`airports.js` exports `AIRPORTS` as a hand-curated list. For a production version, download [OurAirports data](https://ourairports.com/data/) (CC0), filter for airports with IATA codes and scheduled service, and emit a JSON the same shape. Tens of thousands of airports is fine in memory.
+- Real routes deviate from the great circle (winds, airways, restricted airspace). A few degrees of heading rarely changes the side.
+- Times are scheduled, not actual; taxi and holding are folded into the duration.
+- No modelling of wing shadow or of seats far from a window.
 
-## Math notes
+## Audit of the previous version (0.1)
 
-**Heading on a great circle changes continuously.** A great circle from NYC to Tokyo starts heading roughly north-by-northwest, peaks somewhere near the Bering Strait, and ends heading southwest. We recompute the bearing at every sample (every 60 seconds).
+The 0.2 rewrite replaced every module. Issues found in 0.1:
 
-**Sun azimuth conventions vary.** SunCalc returns azimuth from SOUTH going westward. Aviation uses azimuth from NORTH going clockwise. We convert. See `sun.js`.
-
-**Relative bearing.** Once we have sun azimuth (compass) and aircraft heading (compass), the sun's bearing relative to the cabin is `sunAz - heading`, normalized to `[-180, 180]`. Positive = right side, negative = left side. Combined with elevation, this gives a full 3D direction in cabin coordinates.
-
-**Local time at origin.** The input takes "local time at origin" but the math runs in UTC. We approximate the local-to-UTC offset using `longitude / 15` (i.e. solar time, not political time). Good enough for sun position. A v2 could use a tz database for political timezones and DST.
-
-## Known limitations / v2 ideas
-
-- Flight path is great-circle. Real flights deviate for jet streams, ATC routing, restricted airspace. Lateral deviation rarely changes sun position by more than a degree or two, so it's not visually important. Real route data (via FlightAware or similar) could be a v2 paid feature.
-- Local time is approximated from longitude. Fine for sun, off by up to ~2 hours for political-time display.
-- Airport list is small (~150). Swap in OurAirports for full coverage.
-- The cabin is stylized, not photoreal. Detailed GLTF can drop in.
-- Doesn't account for atmospheric refraction beyond what SunCalc does internally (small effect near horizon).
-- Doesn't model in-cabin shading (people in the row blocking the window, etc).
+| Area | Finding | Resolution |
+|---|---|---|
+| Dead code | `scene.js` (the Three.js cabin advertised in the README) was never imported; `three` was an unused dependency. | Removed; replaced by the lightweight sky-compass. |
+| Local time | Times used `longitude / 15` instead of real time zones — LAX by up to ~55 min, Madrid by over 2 h in summer, western China by ~3 h; DST was ignored, so the departure itself was computed at the wrong instant. | IANA zones per airport; conversions through `Intl`, including DST gaps and overlaps. |
+| Mislabelled times | Timeline event chips rendered in the *browser's* zone but were labelled "UTC". | All times shown in origin/destination zones with abbreviations. |
+| Airport loading | Every page load fetched the full ~12 MB OurAirports CSV from GitHub, then silently swapped databases. | Pre-built 3,300-airport dataset, code-split. |
+| Side logic | Any sun more than 30° off the nose counted as "in the window", even at 85° elevation. | Window-normal projection; high or fore/aft sun no longer counts. |
+| Sunrise/sunset | Ignored the horizon dip at altitude. | Horizon dip from the altitude profile. |
+| Flight time | Fixed estimate with no override. | Editable, with a reset to the estimate. |
+| Moon | Sublunar point found by a ~1,700-call grid search. | Closed-form sublunar point. |
+| Night overlay | Meridians with no terminator crossing were skipped, distorting the polygon near the equinoxes. | Cap/meridian intersection per longitude. |
+| Safety | Airport strings from a remote CSV were inserted with `innerHTML` unescaped. | All interpolated text is escaped. |
+| Accessibility | Autocomplete had no ARIA roles; play button was an emoji; event tooltips mouse-only. | ARIA combobox, labelled controls, keyboard-reachable events, `aria-valuetext` on the scrubber, Space to play/pause. |
+| Antipodal / same airport | Antipodal routes produced `NaN`; same-airport check only on IATA. | Both rejected with a message. |
+| Sharing | No way to link to a result. | Flight encoded in the URL hash. |
+| Tests | None. | `node --test` suite for geometry, time zones, astronomy and recommendations. |

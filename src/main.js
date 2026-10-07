@@ -1,191 +1,240 @@
-import { sampleFlight, greatCircleDistanceKm, estimateDurationHours, normLon } from './flight.js';
-import { sunPositionAt, sunRelativeToCabin, findSolarEvents, findMoonEvents, recommendSide } from './sun.js';
-import { MapView } from './mapview.js';
-import { Timeline } from './timeline.js';
-import { attachAirportAutocomplete } from './ui.js';
-import { initAirports } from './airports.js';
-import SunCalc from 'suncalc';
+import './style.css';
+import { loadAirports, findAirport } from './lib/airports.js';
+import { distanceKm } from './lib/geo.js';
+import { zonedToUtc, toLocalInput, clock, zoneAbbr, dayDelta, formatDuration } from './lib/time.js';
+import { createFlight, analyzeFlight, estimateBlockMinutes, DIRECT_SUN } from './lib/flight.js';
+import { SKY_LABEL } from './lib/astro.js';
+import { MapView } from './ui/mapview.js';
+import { Timeline } from './ui/timeline.js';
+import { airportCombobox } from './ui/autocomplete.js';
+import { renderCabinCompass } from './ui/cabin.js';
+import { renderSummary } from './ui/summary.js';
+import { $, sideLabel } from './ui/dom.js';
 
-initAirports();
+const els = {
+  depart: $('#depart'), departZone: $('#depart-zone'),
+  durH: $('#dur-h'), durM: $('#dur-m'), durReset: $('#dur-reset'),
+  error: $('#form-error'), result: $('#result'), share: $('#share'),
+  compass: $('#compass'), timeline: $('#timeline'),
+  nowTime: $('#now-time'), nowSun: $('#now-sun'), nowDetail: $('#now-detail'),
+};
+const emptyState = els.result.innerHTML;
+const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-let fromAirport = null;
-let toAirport   = null;
-let durationHours = 5;
-let flightSamples = [];
-let solarEvents   = [];
+const state = { from: null, to: null, durationOverride: null };
+let current = null;
 
-const fromInput = document.getElementById('from-airport');
-const toInput   = document.getElementById('to-airport');
-const fromSugg  = document.getElementById('from-suggestions');
-const toSugg    = document.getElementById('to-suggestions');
+const mapView = new MapView($('#map'), [els.compass, els.timeline]);
+const updateCompass = renderCabinCompass($('#compass-svg'));
+const timeline = new Timeline(els.timeline, onTime);
+const fromBox = airportCombobox($('#from'), (a) => { state.from = a; routeChanged(); });
+const toBox = airportCombobox($('#to'), (a) => { state.to = a; routeChanged(); });
 
-attachAirportAutocomplete(fromInput, fromSugg, (ap) => {
-  fromAirport = ap;
-  mapView.setAirport('from', ap);
-  updateEstimate();
-  clearSameAirportError();
-  tryAutoCompute();
+// ── Inputs ────────────────────────────────────────────────────────────────
+
+$('#trip').addEventListener('submit', (e) => e.preventDefault());
+
+$('#swap').addEventListener('click', () => {
+  [state.from, state.to] = [state.to, state.from];
+  fromBox.set(state.from);
+  toBox.set(state.to);
+  routeChanged();
 });
-attachAirportAutocomplete(toInput, toSugg, (ap) => {
-  toAirport = ap;
-  mapView.setAirport('to', ap);
-  updateEstimate();
-  clearSameAirportError();
-  tryAutoCompute();
-});
 
-function clearSameAirportError() {
-  toInput.classList.remove('input-error');
-  const err = document.getElementById('same-airport-error');
-  if (err) err.remove();
-}
-
-function showSameAirportError() {
-  if (document.getElementById('same-airport-error')) return;
-  toInput.classList.add('input-error');
-  const msg = document.createElement('small');
-  msg.id = 'same-airport-error';
-  msg.textContent = 'Origin and destination cannot be the same.';
-  msg.style.color = 'var(--error)';
-  toInput.parentElement.appendChild(msg);
-}
-
-function updateEstimate() {
-  if (fromAirport && toAirport) {
-    const dist = greatCircleDistanceKm(fromAirport.lat, fromAirport.lon, toAirport.lat, toAirport.lon);
-    durationHours = estimateDurationHours(dist);
-  }
-}
-
-const now = new Date();
-const defaultDepart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 9, 0);
-const departInput = document.getElementById('depart-time');
-departInput.value = formatForDatetimeLocal(defaultDepart);
-
-let departTimer = null;
-departInput.addEventListener('input', () => {
+let departTimer = 0;
+els.depart.addEventListener('input', () => {
   clearTimeout(departTimer);
-  departTimer = setTimeout(tryAutoCompute, 400);
+  departTimer = setTimeout(compute, 250);
 });
 
-function formatForDatetimeLocal(d) {
-  const pad = (n) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+for (const input of [els.durH, els.durM]) {
+  input.addEventListener('input', () => {
+    const min = (+els.durH.value || 0) * 60 + (+els.durM.value || 0);
+    state.durationOverride = min >= 15 ? min : null;
+    els.durReset.hidden = state.durationOverride === null;
+    clearTimeout(departTimer);
+    departTimer = setTimeout(compute, 250);
+  });
 }
 
-const mapView = new MapView(document.getElementById('map-container'));
-
-// Render overlays at current real time on load.
-mapView.tick(new Date());
-
-const hudTime = document.getElementById('hud-time');
-const hudSun  = document.getElementById('hud-sun');
-
-const timeline = new Timeline({
-  scrubEl:      document.getElementById('timeline-scrub'),
-  eventsEl:     document.getElementById('timeline-events'),
-  startLabelEl: document.getElementById('timeline-start'),
-  endLabelEl:   document.getElementById('timeline-end'),
-  playBtnEl:    document.getElementById('play-btn'),
-  onChange: onTimelineChange,
+els.durReset.addEventListener('click', () => {
+  state.durationOverride = null;
+  els.durReset.hidden = true;
+  showDuration();
+  compute();
 });
 
-function sunStateHud(elevDeg, side, utc) {
-  if (elevDeg > 0) {
-    const sideLabel = side === 'left' || side === 'right' ? ` · ${side.toUpperCase()}` : '';
-    return `☀ ${Math.round(elevDeg)}°${sideLabel}`;
+els.share.addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(location.href);
+    els.share.textContent = 'Link copied';
+  } catch {
+    els.share.textContent = 'Copy the address bar to share';
   }
-  if (elevDeg > -6)  return `🌅 Civil twilight · ${Math.round(elevDeg)}°`;
-  if (elevDeg > -12) return `🌆 Nautical twilight · ${Math.round(elevDeg)}°`;
-  if (elevDeg > -18) return `🌇 Astro twilight · ${Math.round(elevDeg)}°`;
-  const moon = SunCalc.getMoonIllumination(utc);
-  const moonStr = moon.fraction > 0.1 ? ` · Moon ${Math.round(moon.fraction * 100)}%` : '';
-  return `🌑 Night${moonStr}`;
+  setTimeout(() => { els.share.textContent = 'Copy link to this flight'; }, 2000);
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== ' ' || !current || e.target.closest('input, button, textarea, select, a')) return;
+  e.preventDefault();
+  timeline.raf ? timeline.pause() : timeline.resume();
+});
+
+function estimatedMinutes() {
+  return state.from && state.to ? estimateBlockMinutes(distanceKm(state.from, state.to)) : null;
 }
 
-function onTimelineChange(state) {
-  const sun   = sunPositionAt(state.utc, state.lat, state.lon);
-  const cabin = sunRelativeToCabin(sun.azimuthDeg, sun.elevationDeg, state.heading);
-
-  mapView.update(state.lat, state.lon, state.heading, state.utc);
-
-  hudTime.textContent = state.utc.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
-  hudSun.textContent  = sunStateHud(sun.elevationDeg, cabin.side, state.utc);
+function durationMinutes() {
+  return state.durationOverride ?? estimatedMinutes();
 }
 
-function tryAutoCompute() {
-  if (!fromAirport || !toAirport) return;
-  if (fromAirport.iata === toAirport.iata) { showSameAirportError(); return; }
-  const departLocalStr = departInput.value;
-  if (!departLocalStr) return;
-
-  // Parse the datetime-local value as if it's UTC (appending Z avoids browser-timezone
-  // interpretation), then shift by the airport's longitude-based offset to get true UTC.
-  const asUTC = new Date(departLocalStr + 'Z');
-  const offsetHours = fromAirport.lon / 15;
-  const departUtc = new Date(asUTC.getTime() - offsetHours * 3600 * 1000);
-
-  flightSamples = sampleFlight(
-    { lat: fromAirport.lat, lon: fromAirport.lon },
-    { lat: toAirport.lat,   lon: toAirport.lon   },
-    departUtc,
-    durationHours,
-    60
-  );
-
-  solarEvents = [
-    ...findSolarEvents(flightSamples),
-    ...findMoonEvents(flightSamples),
-  ].sort((a, b) => a.t - b.t);
-  const rec = recommendSide(flightSamples);
-
-  renderSummary(rec);
-  document.getElementById('summary').classList.remove('hidden');
-  document.getElementById('timeline-container').classList.remove('hidden');
-
-  mapView.setFlight(flightSamples);
-  timeline.setFlight(flightSamples, solarEvents);
+function showDuration() {
+  const min = durationMinutes();
+  els.durH.value = min == null ? '' : Math.floor(min / 60);
+  els.durM.value = min == null ? '' : min % 60;
 }
 
-const summaryContent = document.getElementById('summary-content');
-
-function renderSummary(rec) {
-  const dist = greatCircleDistanceKm(fromAirport.lat, fromAirport.lon, toAirport.lat, toAirport.lon);
-  const EVENT_LABELS = {
-    sunrise:  '🌅 Sunrise',
-    sunset:   '🌇 Sunset',
-    moonrise: '🌔 Moonrise',
-    moonset:  '🌒 Moonset',
-  };
-  const eventList = solarEvents.length
-    ? solarEvents.map(e => {
-        const off = normLon(e.lon) / 15;
-        const loc = new Date(e.utc.getTime() + off * 3600 * 1000);
-        const t   = loc.toISOString().slice(11, 16);
-        return `<div class="summary-row"><span class="label">${EVENT_LABELS[e.type]}</span><span class="value">${t} local</span></div>`;
-      }).join('')
-    : '<div class="summary-row"><span class="label">No notable events</span><span class="value">during flight</span></div>';
-
-  const daySec   = rec.totalSec - rec.nightSec;
-  const fmtHrs = (sec) => (sec / 3600).toFixed(1) + 'h';
-  const fmtPct = (sec, of) => of > 0 ? (sec / of * 100).toFixed(0) + '%' : '0%';
-  const fmtVal = (sec, of) => `${fmtPct(sec, of)} · ${fmtHrs(sec)}`;
-
-  const dayPct       = fmtVal(daySec, rec.totalSec);
-  const nightPct     = fmtVal(rec.nightSec, rec.totalSec);
-  const leftPct      = fmtVal(rec.leftSec, daySec);
-  const rightPct     = fmtVal(rec.rightSec, daySec);
-  const parallelPct  = fmtVal(rec.parallelSec, daySec);
-
-  summaryContent.innerHTML = `
-    <div class="summary-row"><span class="label">Distance</span><span class="value">${Math.round(dist).toLocaleString()} km</span></div>
-    <div class="summary-row"><span class="label">Duration</span><span class="value">${durationHours.toFixed(1)}h est.</span></div>
-    <div class="summary-row"><span class="label">Daylight</span><span class="value">${dayPct}</span></div>
-    <div class="summary-row summary-subrow"><span class="label">Sun · left window</span><span class="value">${leftPct}</span></div>
-    <div class="summary-row summary-subrow"><span class="label">Sun · right window</span><span class="value">${rightPct}</span></div>
-    <div class="summary-row summary-subrow"><span class="label">Sun · overhead/parallel</span><span class="value">${parallelPct}</span></div>
-    <div class="summary-row"><span class="label">Night</span><span class="value">${nightPct}</span></div>
-    ${eventList}
-    <div class="seat-rec"><strong>Best side:</strong> ${rec.recommendation}</div>
-  `;
+function originTz() {
+  return state.from?.tz ?? browserTz;
 }
+
+function routeChanged() {
+  mapView.setAirports(state.from, state.to);
+  els.departZone.textContent = state.from ? `local time at ${state.from.iata}` : 'local time';
+  if (state.durationOverride === null) showDuration();
+  compute();
+}
+
+function setError(msg) {
+  els.error.textContent = msg ?? '';
+  els.error.hidden = !msg;
+}
+
+// ── Computation ───────────────────────────────────────────────────────────
+
+function compute() {
+  const { from, to } = state;
+  const departUtc = from && zonedToUtc(els.depart.value, from.tz);
+  setError(null);
+
+  if (!from || !to || !departUtc) return clearFlight();
+  if (from.iata === to.iata) {
+    setError('Origin and destination are the same airport.');
+    return clearFlight();
+  }
+
+  let flight;
+  try {
+    flight = createFlight({ from, to, departUtc, durationMin: durationMinutes() });
+  } catch (err) {
+    setError(err.message);
+    return clearFlight();
+  }
+  const analysis = analyzeFlight(flight);
+  current = { flight, analysis };
+
+  renderSummary(els.result, { flight, analysis, from, to, fmt });
+  els.compass.hidden = false;
+  els.timeline.hidden = false;
+  els.share.hidden = false;
+  mapView.invalidate();
+  mapView.setFlight(analysis.samples);
+  timeline.setFlight({
+    totalSec: flight.totalSec,
+    samples: analysis.samples,
+    events: analysis.events,
+    startLabel: `${from.iata} ${fmt.at(flight.departUtc, from.tz)}`,
+    endLabel: `${to.iata} ${fmt.at(flight.arriveUtc, to.tz)}`,
+    describe: (t) => `${fmt.elapsed(t)} into flight, ${fmt.at(new Date(departUtc.getTime() + t * 1000), from.tz)}`,
+    eventLabel: (e) => `${e.type[0].toUpperCase()}${e.type.slice(1)} · ${e.side === 'left' || e.side === 'right' ? `${e.side} side` : sideLabel[e.side]} · ${fmt.clocks(e.utc)}`,
+  });
+  writeHash();
+}
+
+function clearFlight() {
+  if (!current) return;
+  current = null;
+  timeline.pause();
+  els.compass.hidden = true;
+  els.timeline.hidden = true;
+  els.share.hidden = true;
+  els.result.innerHTML = emptyState;
+  mapView.setFlight(null);
+  mapView.setTime(new Date());
+}
+
+const fmt = {
+  at: (utc, tz) => `${clock(utc, tz)} ${zoneAbbr(utc, tz)}`,
+  day: (utc, ref, tz) => {
+    const d = dayDelta(utc, ref, tz);
+    return d ? `${d > 0 ? '+' : '−'}${Math.abs(d)}` : '';
+  },
+  elapsed: (t) => formatDuration(t / 60),
+  /** Wall clock at origin and destination, e.g. "10:00 PDT / 13:00 EDT" (one if they agree). */
+  clocks: (utc) => [...new Set([fmt.at(utc, state.from.tz), fmt.at(utc, state.to.tz)])].join(' / '),
+};
+
+// ── Scrubbing ─────────────────────────────────────────────────────────────
+
+let lastMapDraw = 0;
+let pendingMap = 0;
+
+function onTime(t) {
+  if (!current) return;
+  const { flight } = current;
+  const s = flight.stateAt(t);
+
+  // The day/night overlays are comparatively expensive; cap map redraws at ~20 fps.
+  const drawMap = () => { lastMapDraw = performance.now(); pendingMap = 0; mapView.setTime(s.utc, s); };
+  clearTimeout(pendingMap);
+  if (performance.now() - lastMapDraw > 50) drawMap();
+  else pendingMap = setTimeout(drawMap, 50);
+
+  updateCompass(s);
+  els.nowTime.textContent = `${fmt.elapsed(t)} in · ${fmt.clocks(s.utc)}`;
+
+  const elev = Math.round(s.sun.elevation);
+  if (s.cabin.visible) {
+    const where = s.cabin.side === 'left' || s.cabin.side === 'right' ? `on the ${s.cabin.side}` : sideLabel[s.cabin.side];
+    els.nowSun.textContent = `Sun ${Math.max(0, elev)}° up, ${where}`;
+    els.nowDetail.textContent = s.cabin.right >= DIRECT_SUN ? 'Right-side windows in direct sun'
+      : s.cabin.left >= DIRECT_SUN ? 'Left-side windows in direct sun'
+      : s.sun.elevation > 55 ? 'Sun high overhead — little reaches the windows'
+      : 'Sun off the nose or tail — little reaches the windows';
+  } else {
+    els.nowSun.textContent = SKY_LABEL[s.sky];
+    els.nowDetail.textContent = s.sky === 'night' ? 'Sun well below the horizon' : `Sun ${Math.abs(elev)}° below the horizon`;
+  }
+}
+
+// ── URL state ─────────────────────────────────────────────────────────────
+
+function writeHash() {
+  const p = new URLSearchParams({ from: state.from.iata, to: state.to.iata, dep: els.depart.value });
+  if (state.durationOverride !== null) p.set('dur', state.durationOverride);
+  history.replaceState(null, '', `#${p.toString().replace(/%3A/g, ':')}`);
+}
+
+function readHash() {
+  const p = new URLSearchParams(location.hash.slice(1));
+  state.from = findAirport(p.get('from'));
+  state.to = findAirport(p.get('to'));
+  fromBox.set(state.from);
+  toBox.set(state.to);
+
+  const dep = p.get('dep') ?? '';
+  const today = toLocalInput(new Date(), originTz()).slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(dep)) els.depart.value = dep;
+  else if (/^\d{2}:\d{2}$/.test(dep)) els.depart.value = `${today}T${dep}`;
+  else if (!els.depart.value) els.depart.value = `${today}T09:00`;
+
+  const dur = Number(p.get('dur'));
+  state.durationOverride = dur >= 15 ? Math.round(dur) : null;
+  els.durReset.hidden = state.durationOverride === null;
+  showDuration();
+  routeChanged();
+}
+
+window.addEventListener('hashchange', readHash);
+
+loadAirports().then(readHash, () => setError('Couldn’t load the airport list. Check your connection and reload.'));

@@ -1,20 +1,22 @@
 {
   "name": "shadeward",
-  "version": "0.1.0",
-  "description": "See where the sun will be on your flight - 3D cabin POV with timeline scrubber",
+  "version": "0.2.0",
+  "description": "Find out which side of the plane gets the sun on your flight",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --test test/*.test.js",
+    "airports": "node scripts/build-airports.mjs"
   },
   "dependencies": {
     "leaflet": "^1.9.4",
     "leaflet-gesture-handling": "^1.2.2",
-    "suncalc": "^1.9.0",
-    "three": "^0.160.0"
+    "suncalc": "^1.9.0"
   },
   "devDependencies": {
+    "tz-lookup": "^6.1.25",
     "vite": "^5.0.0"
   }
 }
