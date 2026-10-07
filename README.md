@@ -1,6 +1,8 @@
-# Shadeward
+# Sunseat
 
 Find out which side of the plane gets the sun on your flight — and where to sit for shade, or for the sunset.
+
+(Formerly Shadeward.)
 
 ## What it does
 
