@@ -123,8 +123,6 @@ src/
 
 ## Credits
 
-Inspired by SunFlight and Shadeward, earlier tools that answered the same question. No code, text or images from either was used.
-
 Airport data © [OurAirports](https://ourairports.com/) (public domain). Route list derived from [OpenFlights](https://openflights.org/) (ODbL). Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors via [OpenMapTiles](https://openmaptiles.org/), tiles by [OpenFreeMap](https://openfreemap.org/).
 
 ## Audit of the previous version (0.1)
