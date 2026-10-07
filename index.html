@@ -75,6 +75,12 @@
 
       <section class="compass" id="compass" hidden aria-label="Sun position relative to the aircraft">
         <svg class="compass-svg" id="compass-svg" role="img" aria-labelledby="compass-text"></svg>
+        <div class="cabin3d" id="cabin3d" hidden>
+          <div class="c3-seat" role="group" aria-label="Window seat to view from">
+            <button type="button" data-side="left" aria-pressed="false" title="View from a left window seat">L</button>
+            <button type="button" data-side="right" aria-pressed="true" title="View from a right window seat">R</button>
+          </div>
+        </div>
         <div class="compass-text" id="compass-text">
           <p class="compass-time" id="now-time"></p>
           <p class="compass-sun" id="now-sun"></p>

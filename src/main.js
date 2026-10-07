@@ -16,7 +16,7 @@ const els = {
   depart: $('#depart'), departZone: $('#depart-zone'),
   durH: $('#dur-h'), durM: $('#dur-m'), durReset: $('#dur-reset'),
   error: $('#form-error'), result: $('#result'), share: $('#share'),
-  compass: $('#compass'), timeline: $('#timeline'),
+  compass: $('#compass'), timeline: $('#timeline'), cabin3d: $('#cabin3d'),
   nowTime: $('#now-time'), nowSun: $('#now-sun'), nowDetail: $('#now-detail'),
 };
 const emptyState = els.result.innerHTML;
@@ -24,6 +24,36 @@ const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 const state = { from: null, to: null, durationOverride: null };
 let current = null;
+
+// The 3D cabin view pulls in three.js, so load it only once there is a flight to show.
+let cabinView = null;
+let cabinLoading = null;
+const defaultSeat = () => (current?.analysis.recommendation.seat === 'left' ? 'left' : 'right');
+
+function setSeat(side) {
+  cabinView?.setSide(side);
+  for (const b of els.cabin3d.querySelectorAll('[data-side]')) b.setAttribute('aria-pressed', String(b.dataset.side === side));
+}
+
+els.cabin3d.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-side]');
+  if (b) setSeat(b.dataset.side);
+});
+
+function loadCabinView() {
+  cabinLoading ??= import('./ui/cabin3d.js')
+    .then(({ createCabinView }) => {
+      els.cabin3d.hidden = false;
+      cabinView = createCabinView(els.cabin3d);
+      if (current) {
+        setSeat(defaultSeat());
+        mapView.setFlight(current.analysis.samples); // refit now that the card is taller
+        onTime(timeline.t);
+      }
+    })
+    .catch((err) => console.warn('3D cabin view unavailable:', err));
+  return cabinLoading;
+}
 
 const mapView = new MapView($('#map'), [els.compass, els.timeline]);
 const updateCompass = renderCabinCompass($('#compass-svg'));
@@ -140,6 +170,8 @@ function compute() {
   els.share.hidden = false;
   mapView.invalidate();
   mapView.setFlight(analysis.samples);
+  setSeat(defaultSeat());
+  loadCabinView();
   timeline.setFlight({
     totalSec: flight.totalSec,
     samples: analysis.samples,
@@ -192,6 +224,7 @@ function onTime(t) {
   else pendingMap = setTimeout(drawMap, 50);
 
   updateCompass(s);
+  cabinView?.update(s);
   els.nowTime.textContent = `${fmt.elapsed(t)} in · ${fmt.clocks(s.utc)}`;
 
   const elev = Math.round(s.sun.elevation);

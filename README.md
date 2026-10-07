@@ -12,6 +12,7 @@ Find out which side of the plane gets the sun on your flight — and where to si
 - Lists sunrise, sunset, moonrise and moonset along the way, with the side of the aircraft they're visible from.
 - An interactive map with day/twilight/night shading, the subsolar and sublunar points, and the aircraft on its route.
 - A cabin "sky compass" showing where the sun sits around the aircraft and which windows it reaches.
+- A small 3D view from a window seat (left or right), rendered live from the sun's actual position at each moment: sunlight falls through the windows onto the tray table and seats, glare shows on the sunny side, and the sky outside follows the time of day.
 - A timeline coloured by where the sun is, with scrubbing, playback and clickable events.
 - The URL encodes the flight (`#from=LAX&to=JFK&dep=2026-10-07T08:00&dur=320`) so a result can be shared. `dep` may also be just `HH:MM` (today).
 
@@ -59,6 +60,7 @@ src/
 │   ├── mapview.js     MapLibre map: shading, route, aircraft, sun & moon
 │   ├── timeline.js    Banded timeline, scrubber, playback
 │   ├── cabin.js       Sky-compass SVG
+│   ├── cabin3d.js     Window-seat 3D view (three.js, loaded on demand)
 │   ├── summary.js     Recommendation and flight details panel
 │   ├── autocomplete.js  ARIA combobox for airports
 │   └── dom.js         Small DOM/escaping helpers
@@ -77,6 +79,8 @@ src/
 **Which window.** The sun's direction is projected onto the window normal of each side: `cos(elevation) · sin(bearing from the nose)`. That gives 0 when the sun is overhead, ahead or behind, and 1 when it faces a row of windows squarely. Minutes above 0.25 count as "direct sun" on that side; the recommendation compares the integrated exposure of each side.
 
 **Night shading.** Drawn as a raster: for each pixel of a world-sized canvas (Web Mercator rows), the sun's elevation is one multiply-add, so darkness can ramp smoothly from sunset to the end of astronomical twilight. Where it is dark and the moon is up, the shade is lifted and tinted. The canvas is redrawn as the timeline moves and MapLibre repeats it across world copies.
+
+**Window-seat view.** A procedurally modelled single-aisle cabin (curved sidewall with window cut-outs, bins, 3–3 seating). The sun is a shadow-casting directional light placed at the flight's relative bearing and elevation, and the fuselage is closed apart from the windows, so lit patches fall where the geometry lets them. Outside is a Preetham scattering sky over a cloud deck, with stars after dark. three.js is code-split and only fetched once a flight is shown.
 
 ### Limitations
 
