@@ -4,8 +4,10 @@ import { esc } from './dom.js';
 let uid = 0;
 
 /**
- * ARIA 1.2 combobox for picking an airport. Calls onSelect(airport) when one
- * is chosen and onSelect(null) when the text no longer matches a selection.
+ * ARIA 1.2 combobox for picking an airport. Calls onSelect(airport) when one is
+ * chosen. Typing alone never clears the current choice (so the result on screen
+ * stays put while you search); leaving the field reverts to it, unless the field
+ * was emptied, which calls onSelect(null).
  */
 export function airportCombobox(input, onSelect) {
   const list = document.createElement('ul');
@@ -49,9 +51,20 @@ export function airportCombobox(input, onSelect) {
     }
   };
 
+  const label = (a) => `${a.iata} · ${a.city}`;
+
+  /** After editing without choosing: restore the current choice, or drop it if the field was emptied. */
+  const settle = () => {
+    if (!input.value.trim()) {
+      if (selected) { selected = null; onSelect(null); }
+    } else if (selected) {
+      input.value = label(selected);
+    }
+  };
+
   const choose = (a) => {
     selected = a;
-    input.value = `${a.iata} · ${a.city}`;
+    input.value = label(a);
     close();
     onSelect(a);
   };
@@ -62,12 +75,24 @@ export function airportCombobox(input, onSelect) {
     render();
   };
 
-  input.addEventListener('input', () => {
-    if (selected) { selected = null; onSelect(null); }
-    refresh();
+  input.addEventListener('input', refresh);
+  // Focusing a chosen airport selects it, so typing replaces it. The mouseup
+  // that ends the focusing click would collapse that selection, so cancel it.
+  let keepSelection = false;
+  input.addEventListener('focus', () => {
+    if (!selected && input.value) return refresh();
+    input.select();
+    keepSelection = true;
   });
-  input.addEventListener('focus', () => { if (!selected && input.value) refresh(); else input.select(); });
-  input.addEventListener('blur', () => setTimeout(close, 120));
+  input.addEventListener('mouseup', (e) => {
+    if (keepSelection) e.preventDefault();
+    keepSelection = false;
+  });
+  input.addEventListener('keydown', () => { keepSelection = false; }, true);
+  input.addEventListener('blur', () => {
+    keepSelection = false;
+    setTimeout(() => { close(); settle(); }, 120);
+  });
   input.addEventListener('keydown', (e) => {
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       if (list.hidden) { refresh(); return e.preventDefault(); }
@@ -78,8 +103,9 @@ export function airportCombobox(input, onSelect) {
     } else if (e.key === 'Enter' && !list.hidden && results[active]) {
       choose(results[active]);
       e.preventDefault();
-    } else if (e.key === 'Escape' && !list.hidden) {
+    } else if (e.key === 'Escape') {
       close();
+      settle();
       e.preventDefault();
     }
   });
@@ -91,7 +117,7 @@ export function airportCombobox(input, onSelect) {
   return {
     set(a) {
       selected = a;
-      input.value = a ? `${a.iata} · ${a.city}` : '';
+      input.value = a ? label(a) : '';
     },
     get: () => selected,
   };

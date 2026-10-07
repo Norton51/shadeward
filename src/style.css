@@ -73,6 +73,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   flex-direction: column;
   gap: 20px;
   padding: 22px 22px 16px;
+  overflow-x: hidden;
   overflow-y: auto;
   border-right: 1px solid var(--line);
   background: var(--surface);
@@ -128,10 +129,13 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .combo-list {
   position: absolute; z-index: 1100; top: calc(100% + 4px); left: 0;
   width: max(100%, 300px);
+  max-width: calc(100vw - 32px);
   max-height: 320px; overflow-y: auto;
   margin: 0; padding: 4px; list-style: none;
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow);
 }
+/* The destination field sits at the panel's right edge: open its list leftward. */
+.route .field:last-child .combo-list { left: auto; right: 0; }
 .combo-list li { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border-radius: 8px; cursor: pointer; }
 .combo-list li[aria-selected="true"], .combo-list li:hover { background: var(--surface-2); }
 .combo-code { font: 600 13px var(--mono); color: var(--sun-deep); width: 3.2ch; flex: none; }

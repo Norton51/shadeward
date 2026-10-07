@@ -57,33 +57,39 @@ function latInterval(sub, lon, elevation, below) {
 }
 
 /**
- * Paint day/night shading into an equirectangular-in-longitude, Mercator-in-latitude
- * canvas covering the whole world. Darkness ramps from sunset (−0.833°) to the end of
- * astronomical twilight (−18°); where it is dark and the moon is up, the shade is
- * lifted and tinted to suggest moonlight.
+ * Day/night shading, painted per pixel for the part of the world on screen so
+ * it stays crisp at every zoom. Darkness steps in at sunset (−0.833°) and
+ * deepens to the end of astronomical twilight (−18°); where it is dark and the
+ * moon is up, the shade is lifted and tinted to suggest moonlight.
  */
-const SHADE_W = 1024;
-const SHADE_H = 680;
 const sinD = (d) => Math.sin(d * RAD);
 const S_SET = sinD(-0.833);
 const S_DARK = sinD(-18);
-const ROW_LAT = Array.from({ length: SHADE_H }, (_, r) => Math.atan(Math.sinh(Math.PI * (1 - (2 * (r + 0.5)) / SHADE_H))));
-const COL_LON = Array.from({ length: SHADE_W }, (_, c) => (-180 + (360 * (c + 0.5)) / SHADE_W) * RAD);
+const mercY = (lat) => Math.log(Math.tan(Math.PI / 4 + (lat * RAD) / 2));
 
-function paintShade(ctx, img, sub, lunar, glow) {
+/**
+ * @param lons  pixel-centre longitudes (radians), one per column
+ * @param lats  pixel-centre latitudes (radians), one per row
+ * @param edge  width of the sunset edge in sin(elevation) units, about one pixel,
+ *              so the terminator is anti-aliased instead of stair-stepped
+ */
+function paintShade(img, lons, lats, sub, lunar, glow, edge) {
   const data = img.data;
   const sδ = Math.sin(sub.lat * RAD), cδ = Math.cos(sub.lat * RAD);
   const mδs = Math.sin(lunar.lat * RAD), mδc = Math.cos(lunar.lat * RAD);
-  const sunCos = COL_LON.map((λ) => Math.cos(λ - sub.lon * RAD));
-  const moonCos = COL_LON.map((λ) => Math.cos(λ - lunar.lon * RAD));
+  const sunCos = lons.map((λ) => Math.cos(λ - sub.lon * RAD));
+  const moonCos = lons.map((λ) => Math.cos(λ - lunar.lon * RAD));
+  const W = lons.length;
   let i = 0;
-  for (let r = 0; r < SHADE_H; r++) {
-    const sφ = Math.sin(ROW_LAT[r]), cφ = Math.cos(ROW_LAT[r]);
+  for (const φ of lats) {
+    const sφ = Math.sin(φ), cφ = Math.cos(φ);
     const a = sφ * sδ, b = cφ * cδ, ma = sφ * mδs, mb = cφ * mδc;
-    for (let c = 0; c < SHADE_W; c++, i += 4) {
+    for (let c = 0; c < W; c++, i += 4) {
       const sinEl = a + b * sunCos[c];
-      if (sinEl >= S_SET) { data[i + 3] = 0; continue; }
-      const t = Math.min(1, (S_SET - sinEl) / (S_SET - S_DARK));
+      const below = S_SET - sinEl;
+      if (below <= -edge) { data[i + 3] = 0; continue; }
+      const step = below >= edge ? 1 : (below + edge) / (2 * edge);
+      const t = below <= 0 ? 0 : Math.min(1, below / (S_SET - S_DARK));
       let moon = 0;
       if (glow && t > 0.4) {
         const m = (ma + mb * moonCos[c]) * 4;
@@ -93,10 +99,9 @@ function paintShade(ctx, img, sub, lunar, glow) {
       data[i + 1] = 27 + 120 * moon;
       data[i + 2] = 61 + 150 * moon;
       // A visible step at sunset, deepening through twilight.
-      data[i + 3] = (40 + 115 * t) * (1 - 0.3 * moon);
+      data[i + 3] = (40 * step + 115 * t) * (1 - 0.3 * moon);
     }
   }
-  ctx.putImageData(img, 0, 0);
 }
 
 // ── GeoJSON helpers ─────────────────────────────────────────────────────────
@@ -184,9 +189,9 @@ export class MapView {
     this.utc = new Date();
     this.airports = { from: null, to: null };
     this.moonKey = '';
-    this.shadeCanvas = Object.assign(document.createElement('canvas'), { width: SHADE_W, height: SHADE_H });
-    this.shadeCtx = this.shadeCanvas.getContext('2d', { willReadFrequently: false });
-    this.shadeImg = this.shadeCtx.createImageData(SHADE_W, SHADE_H);
+    this.shadeCanvas = Object.assign(document.createElement('canvas'), { width: 2, height: 2 });
+    this.shadeCtx = this.shadeCanvas.getContext('2d');
+    this.shadeImg = null;
 
     this.map = new maplibregl.Map({
       container: el,
@@ -259,9 +264,12 @@ export class MapView {
       type: 'canvas',
       canvas: this.shadeCanvas,
       animate: false,
-      coordinates: [[-180, MERC_LAT], [180, MERC_LAT], [180, -MERC_LAT], [-180, -MERC_LAT]],
+      coordinates: [[-180, MERC_LAT], [180, MERC_LAT], [180, -MERC_LAT], [-180, -MERC_LAT]], // replaced per view
     });
     map.addLayer({ id: 'shade', type: 'raster', source: 'shade', paint: { 'raster-fade-duration': 0, 'raster-resampling': 'linear' } }, firstLabel);
+    // The shading covers only the visible area, so repaint it as the view changes.
+    map.on('move', () => this._paintShade());
+    map.on('resize', () => this._paintShade());
     map.addLayer({ id: 'terminator', type: 'line', source: 'terminator', paint: { 'line-color': '#f2a93b', 'line-width': 1.25, 'line-opacity': 0.8 } }, firstLabel);
 
     map.addLayer({ id: 'flown', type: 'line', source: 'flown', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#e8590c', 'line-width': 3 } });
@@ -299,16 +307,15 @@ export class MapView {
     const lunar = sublunarPoint(utc);
 
     const terminator = [];
-    for (let lon = -180; lon <= 180; lon += 1) {
+    for (let lon = -180; lon <= 180; lon += 0.25) {
       const iv = latInterval(sub, lon, -0.833, true);
       if (iv) terminator.push([lon, sub.lat > 0 ? iv[1] : iv[0]]);
     }
     this.map.getSource('terminator').setData(line(terminator));
 
     const phase = moonPhase(utc);
-    const glow = Math.max(0, (phase.illumination - 0.25) / 0.75);
-    paintShade(this.shadeCtx, this.shadeImg, sub, lunar, glow);
-    this._refreshShade();
+    this.sky = { sub, lunar, glow: Math.max(0, (phase.illumination - 0.25) / 0.75) };
+    this._paintShade();
 
     // Redraw the moon icon only when its shape visibly changes.
     const key = phase.phase.toFixed(2);
@@ -322,6 +329,49 @@ export class MapView {
       point(sub.lon, sub.lat, { icon: 'sun', opacity: 1 }),
       point(lunar.lon, lunar.lat, { icon: 'moon', opacity: 0.5 + 0.5 * phase.illumination }),
     ]));
+  }
+
+  /**
+   * Paint the shading for the current view at up to screen resolution. When the
+   * view shows more than one world, paint one world and let MapLibre repeat it.
+   */
+  _paintShade() {
+    if (!this.ready || !this.sky) return;
+    const map = this.map;
+    const { clientWidth: cssW, clientHeight: cssH } = map.getContainer();
+    if (!cssW || !cssH) return;
+    const bounds = map.getBounds();
+    let west = bounds.getWest(), east = bounds.getEast();
+    const north = Math.min(bounds.getNorth(), MERC_LAT), south = Math.max(bounds.getSouth(), -MERC_LAT);
+    if (north <= south) return;
+    let pxPerLon = cssW / (east - west);
+    if (east - west >= 360) { west = -180; east = 180; }
+
+    // Cap the work at roughly 600k pixels; bilinear filtering hides the rest.
+    const yN = mercY(north), yS = mercY(south);
+    const spanX = (east - west) * RAD;
+    let W = Math.round((east - west) * pxPerLon);
+    let H = Math.round(W * ((yN - yS) / spanX));
+    const scale = Math.min(1, Math.sqrt(600000 / Math.max(1, W * H)));
+    W = Math.max(2, Math.round(W * scale));
+    H = Math.max(2, Math.round(H * scale));
+
+    if (this.shadeCanvas.width !== W || this.shadeCanvas.height !== H) {
+      this.shadeCanvas.width = W;
+      this.shadeCanvas.height = H;
+      this.shadeImg = this.shadeCtx.createImageData(W, H);
+    }
+    const lons = Array.from({ length: W }, (_, c) => (west + ((east - west) * (c + 0.5)) / W) * RAD);
+    const lats = Array.from({ length: H }, (_, r) => Math.atan(Math.sinh(yN + ((yS - yN) * (r + 0.5)) / H)));
+    // One pixel of longitude at the equator, as a change in sin(elevation).
+    const edge = Math.max(1e-4, Math.sin(spanX / W));
+    const { sub, lunar, glow } = this.sky;
+    paintShade(this.shadeImg, lons, lats, sub, lunar, glow, edge);
+    this.shadeCtx.putImageData(this.shadeImg, 0, 0);
+
+    const src = map.getSource('shade');
+    src.setCoordinates([[west, north], [east, north], [east, south], [west, south]]);
+    this._refreshShade();
   }
 
   /** A paused canvas source only re-reads its canvas while playing; play for a couple of frames. */

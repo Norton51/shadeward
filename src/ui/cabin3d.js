@@ -13,7 +13,7 @@ import {
   BufferGeometry, Float32BufferAttribute, PlaneGeometry, BoxGeometry, Shape, ExtrudeGeometry,
   Mesh, InstancedMesh, MeshStandardMaterial, MeshBasicMaterial,
   DirectionalLight, HemisphereLight, Points, PointsMaterial, PMREMGenerator, CanvasTexture, RepeatWrapping,
-  SphereGeometry, BackSide, DoubleSide, PCFSoftShadowMap, SRGBColorSpace, ACESFilmicToneMapping,
+  SphereGeometry, BackSide, DoubleSide, PCFShadowMap, SRGBColorSpace, ACESFilmicToneMapping,
 } from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
@@ -333,7 +333,7 @@ export function createCabinView(container) {
   const renderer = new WebGLRenderer({ antialias: true, powerPreference: 'low-power' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = PCFSoftShadowMap;
+  renderer.shadowMap.type = PCFShadowMap;
   renderer.outputColorSpace = SRGBColorSpace;
   renderer.toneMapping = ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.6;
