@@ -14,7 +14,8 @@ Find out which side of the plane gets the sun on your flight — and where to si
 - A cabin "sky compass" showing where the sun sits around the aircraft and which windows it reaches.
 - A small 3D view from a window seat (left or right), rendered live from the sun's actual position at each moment: sunlight falls through the windows onto the tray table and seats, glare shows on the sunny side, and the sky outside follows the time of day.
 - A timeline coloured by where the sun is, with scrubbing, playback and clickable events.
-- The URL encodes the flight (`#from=LAX&to=JFK&dep=2026-10-07T08:00&dur=320`) so a result can be shared. `dep` may also be just `HH:MM` (today).
+- Every flight has a shareable address: `/lax-jfk?dep=2026-10-07T08:00&dur=320` (`dep` may also be just `HH:MM` for today; `dur` only when overridden). Older `#from=LAX&to=JFK…` links still work and are rewritten.
+- Pre-rendered pages for the 500 busiest routes (both directions), an explainer on choosing a side, and notes on how route, timing, altitude and weather affect the estimate.
 
 ## Development
 
@@ -22,8 +23,28 @@ Find out which side of the plane gets the sun on your flight — and where to si
 npm install
 npm run dev       # http://localhost:5173
 npm test          # unit tests for the geometry, time-zone and analysis code
-npm run build     # static site in dist/
+npm run build     # static site in dist/ (vite build + pre-rendered pages)
 ```
+
+`SITE_URL` sets the canonical origin used in page metadata and the sitemap (default `https://sunseat.org`):
+
+```bash
+SITE_URL=https://example.com npm run build
+```
+
+### SEO and pre-rendered pages
+
+`npm run build` runs `scripts/prerender.mjs` after Vite. It writes into `dist/`:
+
+- **Route pages** (`/lax-jfk`, `/jfk-lax`, … about 1,000): each runs the real analysis for four seasons × four departure times and writes a best-side table, sunrise/sunset sides, distance, flight time and accuracy notes, then loads the full app for that route.
+- **`/which-side-of-the-plane`**: an explainer covering the rule of thumb, seasons, and how accurate predictions are.
+- **`/routes`**: an index of every route page.
+- **`sitemap.xml`** and **`robots.txt`**, plus canonical, Open Graph and structured-data tags on every page.
+- **`/app`**: the bare app, which `vercel.json` serves for routes without their own page.
+
+Shared images and icons live in `public/` (`og.png`, app icons, `manifest.webmanifest`).
+
+After deploying: verify the domain in [Google Search Console](https://search.google.com/search-console) and [Bing Webmaster Tools](https://www.bing.com/webmasters), and submit `https://<domain>/sitemap.xml`.
 
 ### Map
 
@@ -31,7 +52,7 @@ The map uses [MapLibre GL JS](https://maplibre.org/) with vector tiles from [Ope
 
 ### Analytics
 
-`src/analytics.js` loads [Vercel Web Analytics](https://vercel.com/docs/analytics). It only collects data when deployed on Vercel with Web Analytics enabled for the project (Project → Analytics → Enable). The URL hash, which holds the flight, is stripped from reported URLs, and repeat page views from hash updates are dropped.
+`src/analytics.js` loads [Vercel Web Analytics](https://vercel.com/docs/analytics). It only collects data when deployed on Vercel with Web Analytics enabled for the project (Project → Analytics → Enable). Only the path is reported (the query, which holds departure times, is stripped), and a page view is counted once per route, not on every edit.
 
 ### Airport data
 
@@ -44,11 +65,20 @@ npm run airports -- path/to/airports.csv
 
 The dataset is code-split and loaded on first use (~105 kB gzipped).
 
+### Route list
+
+`src/data/routes.json` lists the 500 airport pairs that get pre-rendered pages. Openly licensed per-route passenger data doesn't exist, so `scripts/build-routes.mjs` combines a hand-picked seed of routes that published rankings regularly list as the busiest with the remainder ranked from [OpenFlights](https://openflights.org/data) route data by a gravity-style score (airlines on the route × airport size). OpenFlights data is under the [Open Database License](https://opendatacommons.org/licenses/odbl/1-0/), so `routes.json` is a derived database under the same licence.
+
+```bash
+npm run routes                          # downloads routes.dat
+npm run routes -- path/to/routes.dat
+```
+
 ## Architecture
 
 ```
 src/
-├── main.js            App controller: form state, URL hash, wiring
+├── main.js            App controller: form state, URL (path + query), wiring
 ├── analytics.js       Vercel Web Analytics
 ├── lib/               Pure logic (no DOM), covered by test/
 │   ├── geo.js         Great-circle route, distance, bearing
@@ -65,6 +95,7 @@ src/
 │   ├── autocomplete.js  ARIA combobox for airports
 │   └── dom.js         Small DOM/escaping helpers
 ├── data/airports.json Generated airport dataset
+├── data/routes.json   Routes that get pre-rendered pages
 └── style.css
 ```
 
@@ -78,15 +109,23 @@ src/
 
 **Which window.** The sun's direction is projected onto the window normal of each side: `cos(elevation) · sin(bearing from the nose)`. That gives 0 when the sun is overhead, ahead or behind, and 1 when it faces a row of windows squarely. Minutes above 0.25 count as "direct sun" on that side; the recommendation compares the integrated exposure of each side.
 
-**Night shading.** Drawn as a raster: for each pixel of a world-sized canvas (Web Mercator rows), the sun's elevation is one multiply-add, so darkness can ramp smoothly from sunset to the end of astronomical twilight. Where it is dark and the moon is up, the shade is lifted and tinted. The canvas is redrawn as the timeline moves and MapLibre repeats it across world copies.
+**Night shading.** Drawn as a raster for the visible area at up to screen resolution: for each pixel (Web Mercator rows), the sun's elevation is one multiply-add, so darkness ramps smoothly from sunset to the end of astronomical twilight with an anti-aliased edge at sunset. Where it is dark and the moon is up, the shade is lifted and tinted. It is repainted as the timeline plays and as the map moves.
 
 **Window-seat view.** A procedurally modelled single-aisle cabin (curved sidewall with window cut-outs, bins, 3–3 seating). The sun is a shadow-casting directional light placed at the flight's relative bearing and elevation, and the fuselage is closed apart from the windows, so lit patches fall where the geometry lets them. Outside is a Preetham scattering sky over a cloud deck, with stars after dark. three.js is code-split and only fetched once a flight is shown.
 
-### Limitations
+### Limitations: route, timing, altitude and weather
 
-- Real routes deviate from the great circle (winds, airways, restricted airspace). A few degrees of heading rarely changes the side.
-- Times are scheduled, not actual; taxi and holding are folded into the duration.
+- **Route.** Real flights deviate from the great circle for jet streams, airways, oceanic tracks and closed airspace. A few degrees of heading rarely changes the side, except when the sun is nearly ahead or behind (when either side is fine).
+- **Timing.** Times are scheduled, not actual. Delays, holding and winds shift every sunrise and sunset; a strong jet stream can change a long-haul flight by an hour.
+- **Altitude.** The horizon dip at cruise is modelled (sunrise earlier and sunset later than on the ground, often by 10–20 minutes), with a simple climb and descent profile.
+- **Weather.** Cloud below doesn't hide the sun but reflects glare up into windows on either side; flying through cloud during climb and descent softens it. Neither is modelled.
 - No modelling of wing shadow or of seats far from a window.
+
+## Credits
+
+Inspired by SunFlight and Shadeward, earlier tools that answered the same question. No code, text or images from either was used.
+
+Airport data © [OurAirports](https://ourairports.com/) (public domain). Route list derived from [OpenFlights](https://openflights.org/) (ODbL). Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors via [OpenMapTiles](https://openmaptiles.org/), tiles by [OpenFreeMap](https://openfreemap.org/).
 
 ## Audit of the previous version (0.1)
 
@@ -106,5 +145,5 @@ The 0.2 rewrite replaced every module. Issues found in 0.1:
 | Safety | Airport strings from a remote CSV were inserted with `innerHTML` unescaped. | All interpolated text is escaped. |
 | Accessibility | Autocomplete had no ARIA roles; play button was an emoji; event tooltips mouse-only. | ARIA combobox, labelled controls, keyboard-reachable events, `aria-valuetext` on the scrubber, Space to play/pause. |
 | Antipodal / same airport | Antipodal routes produced `NaN`; same-airport check only on IATA. | Both rejected with a message. |
-| Sharing | No way to link to a result. | Flight encoded in the URL hash. |
+| Sharing | No way to link to a result. | Flight encoded in the URL (now path + query). |
 | Tests | None. | `node --test` suite for geometry, time zones, astronomy and recommendations. |

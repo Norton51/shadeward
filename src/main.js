@@ -130,6 +130,7 @@ function originTz() {
 }
 
 function routeChanged() {
+  syncPage();
   mapView.setAirports(state.from, state.to);
   els.departZone.textContent = state.from ? `local time at ${state.from.iata}` : 'local time';
   if (state.durationOverride === null) showDuration();
@@ -181,7 +182,7 @@ function compute() {
     describe: (t) => `${fmt.elapsed(t)} into flight, ${fmt.at(new Date(departUtc.getTime() + t * 1000), from.tz)}`,
     eventLabel: (e) => `${e.type[0].toUpperCase()}${e.type.slice(1)} · ${e.side === 'left' || e.side === 'right' ? `${e.side} side` : sideLabel[e.side]} · ${fmt.clocks(e.utc)}`,
   });
-  writeHash();
+  writeUrl();
 }
 
 function clearFlight() {
@@ -242,17 +243,43 @@ function onTime(t) {
 }
 
 // ── URL state ─────────────────────────────────────────────────────────────
+//
+// A flight lives in the path and query, e.g. /lax-jfk?dep=2026-10-07T08:00&dur=320,
+// so every route has a real, indexable address. Popular routes are also
+// pre-rendered as static pages at the same paths (scripts/prerender.mjs).
+// Older #from=LAX&to=JFK links are still read, then rewritten.
 
-function writeHash() {
-  const p = new URLSearchParams({ from: state.from.iata, to: state.to.iata, dep: els.depart.value });
+const ROUTE_PATH = /^\/([a-z]{3})-([a-z]{3})\/?$/i;
+
+function flightUrl() {
+  const p = new URLSearchParams({ dep: els.depart.value });
   if (state.durationOverride !== null) p.set('dur', state.durationOverride);
-  history.replaceState(null, '', `#${p.toString().replace(/%3A/g, ':')}`);
+  return `/${state.from.iata.toLowerCase()}-${state.to.iata.toLowerCase()}?${p.toString().replace(/%3A/g, ':')}`;
 }
 
-function readHash() {
-  const p = new URLSearchParams(location.hash.slice(1));
-  state.from = findAirport(p.get('from'));
-  state.to = findAirport(p.get('to'));
+// Pre-rendered route pages carry a written guide for their own route; hide it
+// once the app shows a different one, and keep the tab title in step.
+const guide = document.querySelector('.guide[data-route]');
+const pageTitle = document.title;
+
+function syncPage() {
+  const slug = state.from && state.to ? `${state.from.iata}-${state.to.iata}`.toLowerCase() : null;
+  if (guide) guide.hidden = slug !== guide.dataset.route;
+  document.title = !slug || slug === guide?.dataset.route ? pageTitle
+    : `${state.from.city} to ${state.to.city} (${state.from.iata}–${state.to.iata}) · Sunseat`;
+}
+
+function writeUrl() {
+  const url = flightUrl();
+  if (url !== location.pathname + location.search) history.replaceState(null, '', url);
+}
+
+function readUrl() {
+  const legacy = location.hash.length > 1 ? new URLSearchParams(location.hash.slice(1)) : null;
+  const route = ROUTE_PATH.exec(location.pathname);
+  const p = legacy ?? new URLSearchParams(location.search);
+  state.from = findAirport(legacy ? p.get('from') : route?.[1]);
+  state.to = findAirport(legacy ? p.get('to') : route?.[2]);
   fromBox.set(state.from);
   toBox.set(state.to);
 
@@ -260,7 +287,7 @@ function readHash() {
   const today = toLocalInput(new Date(), originTz()).slice(0, 10);
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(dep)) els.depart.value = dep;
   else if (/^\d{2}:\d{2}$/.test(dep)) els.depart.value = `${today}T${dep}`;
-  else if (!els.depart.value) els.depart.value = `${today}T09:00`;
+  else els.depart.value = `${today}T09:00`;
 
   const dur = Number(p.get('dur'));
   state.durationOverride = dur >= 15 ? Math.round(dur) : null;
@@ -269,6 +296,16 @@ function readHash() {
   routeChanged();
 }
 
-window.addEventListener('hashchange', readHash);
+window.addEventListener('popstate', readUrl);
+window.addEventListener('hashchange', readUrl);
 
-loadAirports().then(readHash, () => setError('Couldn’t load the airport list. Check your connection and reload.'));
+// Example and route links inside the app navigate without a page load.
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a[data-route]');
+  if (!a || e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+  e.preventDefault();
+  history.pushState(null, '', a.getAttribute('href'));
+  readUrl();
+});
+
+loadAirports().then(readUrl, () => setError('Couldn’t load the airport list. Check your connection and reload.'));
