@@ -24,6 +24,10 @@ npm test          # unit tests for the geometry, time-zone and analysis code
 npm run build     # static site in dist/
 ```
 
+### Analytics
+
+`src/analytics.js` loads [Vercel Web Analytics](https://vercel.com/docs/analytics). It only collects data when deployed on Vercel with Web Analytics enabled for the project (Project → Analytics → Enable). The URL hash, which holds the flight, is stripped from reported URLs, and repeat page views from hash updates are dropped.
+
 ### Airport data
 
 `src/data/airports.json` is generated from [OurAirports](https://ourairports.com/data/) (public domain) and committed. Each row is `[iata, name, city, country, lat, lon, ianaTimeZone]`; the time zone is resolved at build time with `tz-lookup`. To refresh it:
@@ -40,6 +44,7 @@ The dataset is code-split and loaded on first use (~105 kB gzipped).
 ```
 src/
 ├── main.js            App controller: form state, URL hash, wiring
+├── analytics.js       Vercel Web Analytics
 ├── lib/               Pure logic (no DOM), covered by test/
 │   ├── geo.js         Great-circle route, distance, bearing
 │   ├── astro.js       Sun/moon positions (SunCalc), subsolar/sublunar points, moon phase

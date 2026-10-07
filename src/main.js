@@ -1,4 +1,5 @@
 import './style.css';
+import './analytics.js';
 import { loadAirports, findAirport } from './lib/airports.js';
 import { distanceKm } from './lib/geo.js';
 import { zonedToUtc, toLocalInput, clock, zoneAbbr, dayDelta, formatDuration } from './lib/time.js';
