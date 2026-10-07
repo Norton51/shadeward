@@ -421,14 +421,21 @@ export class MapView {
     for (const o of this.overlays) {
       if (o.hidden) continue;
       const r = o.getBoundingClientRect();
-      // Attribute each overlay to the map edge it hugs most closely.
-      const gaps = { top: r.top - box.top, bottom: box.bottom - r.bottom, left: r.left - box.left, right: box.right - r.right };
-      const edge = Object.keys(gaps).reduce((a, b) => (gaps[a] <= gaps[b] ? a : b));
-      const depth = edge === 'top' ? r.bottom - box.top : edge === 'bottom' ? box.bottom - r.top
-        : edge === 'left' ? r.right - box.left : box.right - r.left;
-      // Ignore overlays so wide or tall that avoiding them would leave no room.
-      const span = edge === 'top' || edge === 'bottom' ? box.height : box.width;
-      if (depth < span * 0.45) pad[edge] = Math.max(pad[edge], depth + 16);
+      // How far the overlay reaches in from each edge it is docked against
+      // (within 40px of it). A card in a corner touches two edges; pad the one
+      // that costs less room, e.g. the right edge for a tall card top-right.
+      const reach = {
+        top: [r.top - box.top, r.bottom - box.top, box.height],
+        bottom: [box.bottom - r.bottom, box.bottom - r.top, box.height],
+        left: [r.left - box.left, r.right - box.left, box.width],
+        right: [box.right - r.right, box.right - r.left, box.width],
+      };
+      const options = Object.entries(reach)
+        .filter(([, [gap, depth, span]]) => gap <= 40 && depth < span * 0.6)
+        .sort((a, b) => a[1][1] / a[1][2] - b[1][1] / b[1][2]);
+      if (!options.length) continue;
+      const [edge, [, depth]] = options[0];
+      pad[edge] = Math.max(pad[edge], depth + 16);
     }
     return pad;
   }

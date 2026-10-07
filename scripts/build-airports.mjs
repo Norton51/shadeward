@@ -1,15 +1,19 @@
 // Builds src/data/airports.json from the OurAirports dataset (public domain).
 //
-//   node scripts/build-airports.mjs [path/to/airports.csv]
+//   node scripts/build-airports.mjs [airports.csv] [routes.dat]
 //
-// Without an argument the CSV is downloaded. Each airport is emitted as a compact
-// row [iata, name, city, country, lat, lon, ianaTimeZone] so the app can render
-// political local times without a runtime timezone lookup.
+// Without arguments both files are downloaded. Each airport is emitted as a
+// compact row [iata, name, city, country, lat, lon, ianaTimeZone, routes, keywords] so the
+// app can render political local times without a runtime timezone lookup.
+// `routes` counts the airport's routes in OpenFlights (ODbL) and ranks busy
+// hubs first in search (Heathrow before Gatwick before London City); `keywords`
+// are OurAirports' alternative names (Narita → "Tokyo"), Latin script only.
 
 import { readFile, writeFile } from 'node:fs/promises';
 import tzlookup from 'tz-lookup';
 
 const SOURCE = 'https://raw.githubusercontent.com/davidmegginson/ourairports-data/main/airports.csv';
+const ROUTES = 'https://raw.githubusercontent.com/jpatokal/openflights/master/data/routes.dat';
 const OUT = new URL('../src/data/airports.json', import.meta.url);
 
 function parseCsv(text) {
@@ -34,9 +38,29 @@ function parseCsv(text) {
 
 const round = (n) => Math.round(n * 1e4) / 1e4;
 
+/** Alternative names for search, Latin script only, kept short. */
+function keywordsOf(raw = '') {
+  const words = raw.split(',').map((w) => w.trim()).filter((w) => w && /^[\x20-\x7e\u00c0-\u024f]+$/.test(w));
+  let out = '';
+  for (const w of words) {
+    if ((out + ';' + w).length > 80) break;
+    out = out ? `${out};${w}` : w;
+  }
+  return out;
+}
+
 const text = process.argv[2]
   ? await readFile(process.argv[2], 'utf8')
   : await (await fetch(SOURCE)).text();
+
+const routesText = process.argv[3]
+  ? await readFile(process.argv[3], 'utf8')
+  : await (await fetch(ROUTES)).text();
+const routeCount = new Map();
+for (const line of routesText.split('\n')) {
+  const [, , src, , dst] = line.split(',');
+  for (const code of [src, dst]) if (code) routeCount.set(code, (routeCount.get(code) || 0) + 1);
+}
 
 const [header, ...rows] = parseCsv(text);
 const col = Object.fromEntries(header.map((h, i) => [h, i]));
@@ -58,7 +82,7 @@ for (const r of rows) {
   const name = r[col.name].trim();
   byIata.set(iata, {
     type,
-    row: [iata, name, (r[col.municipality] || '').trim() || name, r[col.iso_country], round(lat), round(lon), tzlookup(lat, lon)],
+    row: [iata, name, (r[col.municipality] || '').trim() || name, r[col.iso_country], round(lat), round(lon), tzlookup(lat, lon), routeCount.get(iata) || 0, keywordsOf(r[col.keywords])],
   });
 }
 

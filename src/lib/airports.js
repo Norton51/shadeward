@@ -13,9 +13,10 @@ function countryName(code) {
 
 export function loadAirports() {
   loading ??= import('../data/airports.json').then(({ default: rows }) => {
-    index = rows.map(([iata, name, city, country, lat, lon, tz]) => ({
-      iata, name, city, country, countryName: countryName(country), lat, lon, tz,
-      _city: fold(city), _name: fold(name), _country: fold(countryName(country)),
+    index = rows.map(([iata, name, city, country, lat, lon, tz, routes, keywords = '']) => ({
+      iata, name, city, country, countryName: countryName(country), lat, lon, tz, routes: routes || 0,
+      _kw: keywords ? fold(keywords).split(';') : [],
+      _city: fold(city), _base: fold(city.split(/[(,]/)[0].trim()), _name: fold(name), _country: fold(countryName(country)),
     }));
     return index;
   });
@@ -37,15 +38,18 @@ export function searchAirports(query, limit = 8) {
     const code = a.iata.toLowerCase();
     let score = 0;
     if (code === q) score = 100;
-    else if (a._city === q) score = 80;
+    else if (a._city === q || a._base === q) score = 80; // "Paris (Roissy…)" counts as Paris
     else if (code.startsWith(q)) score = 70;
     else if (a._city.startsWith(q)) score = 60;
+    else if (a._kw.includes(q)) score = 75; // e.g. Narita is listed as "Tokyo"
     else if (a._name.startsWith(q)) score = 50;
+    else if (a._kw.some((k) => k.startsWith(q))) score = 45;
     else if (a._city.includes(q)) score = 40;
     else if (a._name.includes(q)) score = 30;
     else if (q.length > 3 && a._country.startsWith(q)) score = 20;
     if (score) scored.push([score, a]);
   }
-  scored.sort((x, y) => y[0] - x[0] || x[1].iata.localeCompare(y[1].iata));
+  // Within a tier, busiest airports first (Heathrow before Gatwick before London City).
+  scored.sort((x, y) => y[0] - x[0] || y[1].routes - x[1].routes || x[1].iata.localeCompare(y[1].iata));
   return scored.slice(0, limit).map(([, a]) => a);
 }

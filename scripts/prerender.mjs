@@ -1,6 +1,6 @@
 // Runs after `vite build`. Writes static, indexable pages into dist/:
 //
-//   /                          home, with structured data and popular routes
+//   /                          home page (built from home.html), with popular routes
 //   /lax-jfk, /jfk-lax, …      one page per direction of each route in routes.json
 //   /which-side-of-the-plane   explainer, including how accurate the estimate is
 //   /routes                    index of every route page
@@ -13,7 +13,7 @@
 //
 // SITE_URL sets the canonical origin (default https://sunseat.org).
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { createFlight, analyzeFlight, estimateBlockMinutes } from '../src/lib/flight.js';
 import { distanceKm, bearing } from '../src/lib/geo.js';
 import { zonedToUtc, formatDuration } from '../src/lib/time.js';
@@ -274,32 +274,39 @@ for (const [A, B] of directed) {
   if (++n % 100 === 0) console.log(`  ${n}/${directed.length} route pages (${((Date.now() - started) / 1000).toFixed(0)}s)`);
 }
 
-// Home
-const popular = directed.slice(0, 24);
-await out('/', page({
-  title: 'Sunseat: which side of the plane gets the sun?',
-  description: 'Free tool: see which side of the plane gets the sun on your flight, where to sit for shade or for the sunset, with a live map and window-seat view.',
-  path: '/',
-  jsonLd: {
-    '@context': 'https://schema.org',
-    '@type': 'WebApplication',
-    name: 'Sunseat',
-    url: `${SITE}/`,
-    applicationCategory: 'TravelApplication',
-    operatingSystem: 'Any (web browser)',
-    description: 'Shows where the sun will be from your seat on any flight and which side of the plane to sit on for shade or views.',
-    offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
-  },
-  body: `
-      <nav class="guide" aria-labelledby="popular-title">
-        <h2 id="popular-title">Popular routes</h2>
-        <ul class="guide-links">
-          ${popular.map(([A, B]) => `<li><a href="/${slug(A, B)}">${esc(A.iata)} → ${esc(B.iata)}</a></li>`).join('')}
-          <li><a href="/routes">All routes</a></li>
-          <li><a href="/which-side-of-the-plane">How it works</a></li>
-        </ul>
-      </nav>`,
-}));
+// Home (from home.html), with a recognisable set of popular routes.
+const FEATURED = ['LAX-JFK', 'JFK-LAX', 'JFK-LHR', 'LHR-JFK', 'LHR-DXB', 'DXB-LHR', 'LHR-SIN', 'SIN-LHR', 'SFO-HND', 'LAX-NRT',
+  'LAX-SYD', 'SYD-LAX', 'CDG-JFK', 'LHR-HKG', 'SYD-MEL', 'MEL-SYD', 'BCN-MAD', 'SIN-SYD', 'DXB-SYD', 'JFK-HND',
+  'ORD-LHR', 'SFO-LHR', 'DEL-BOM', 'HKG-TPE'];
+const pageSet = new Set(directed.map(([A, B]) => `${A.iata}-${B.iata}`));
+const popular = FEATURED.filter((k) => pageSet.has(k)).map((k) => k.split('-').map((c) => airports.get(c)));
+const routeChip = ([A, B]) => `<li><a href="/${slug(A, B)}">${esc(A.city)} → ${esc(B.city)}</a></li>`;
+const homeTemplate = await readFile(new URL('home.html', DIST), 'utf8');
+await out('/', homeTemplate
+  .replace('<!--seo:head-->', headTags({
+    title: 'Sunseat: which side of the plane gets the sun?',
+    description: 'Free tool: see which side of the plane gets the sun on your flight, where to sit for shade or for the sunset, with a live map and window-seat view.',
+    path: '/',
+    jsonLd: {
+      '@context': 'https://schema.org',
+      '@type': 'WebApplication',
+      name: 'Sunseat',
+      url: `${SITE}/`,
+      applicationCategory: 'TravelApplication',
+      operatingSystem: 'Any (web browser)',
+      description: 'Shows where the sun will be from your seat on any flight and which side of the plane to sit on for shade or views.',
+      offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+    },
+  }))
+  .replace('<!--home:popular-->', `
+    <section class="home-section" aria-labelledby="popular-title">
+      <h2 id="popular-title">Popular routes</h2>
+      <ul class="guide-links">
+        ${popular.map(routeChip).join('\n        ')}
+        <li><a href="/routes">All ${directed.length.toLocaleString('en-US')} routes</a></li>
+      </ul>
+    </section>`));
+await unlink(new URL('home.html', DIST));
 
 // Bare app for routes without a page (served by the vercel.json rewrite).
 await out('/app', page({ title: 'Sunseat: which side of the plane gets the sun?', description: 'See which side of the plane gets the sun on your flight.', path: null, jsonLd: null }));

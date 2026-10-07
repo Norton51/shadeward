@@ -6,6 +6,8 @@ Find out which side of the plane gets the sun on your flight — and where to si
 
 ## What it does
 
+- A home page with a quick flight search that opens the planner for that route.
+
 - Pick an origin and destination (≈3,300 airports with scheduled service), a departure time in the origin's local time, and optionally override the estimated flight time.
 - Simulates the great-circle route minute by minute: aircraft position, heading, altitude, and the sun and moon relative to the cabin.
 - Recommends a side for shade, or explains why it doesn't matter (dark flight, sun high or fore/aft, sun splits evenly).
@@ -21,7 +23,7 @@ Find out which side of the plane gets the sun on your flight — and where to si
 
 ```bash
 npm install
-npm run dev       # http://localhost:5173
+npm run dev       # planner at http://localhost:5173, home page at /home.html
 npm test          # unit tests for the geometry, time-zone and analysis code
 npm run build     # static site in dist/ (vite build + pre-rendered pages)
 ```
@@ -40,7 +42,8 @@ SITE_URL=https://example.com npm run build
 - **`/which-side-of-the-plane`**: an explainer covering the rule of thumb, seasons, and how accurate predictions are.
 - **`/routes`**: an index of every route page.
 - **`sitemap.xml`** and **`robots.txt`**, plus canonical, Open Graph and structured-data tags on every page.
-- **`/app`**: the bare app, which `vercel.json` serves for routes without their own page.
+- **`/`**: the home page, built from `home.html` (`src/home.js`) with popular routes added.
+- **`/app`**: the planner with no route chosen; `vercel.json` also serves it for routes without their own page.
 
 Shared images and icons live in `public/` (`og.png`, app icons, `manifest.webmanifest`).
 
@@ -56,11 +59,11 @@ The map uses [MapLibre GL JS](https://maplibre.org/) with vector tiles from [Ope
 
 ### Airport data
 
-`src/data/airports.json` is generated from [OurAirports](https://ourairports.com/data/) (public domain) and committed. Each row is `[iata, name, city, country, lat, lon, ianaTimeZone]`; the time zone is resolved at build time with `tz-lookup`. To refresh it:
+`src/data/airports.json` is generated from [OurAirports](https://ourairports.com/data/) (public domain) and committed. Each row is `[iata, name, city, country, lat, lon, ianaTimeZone, routes, keywords]`. The time zone is resolved at build time with `tz-lookup`; `routes` (the airport's route count in OpenFlights) ranks busy hubs first in search, so "London" offers Heathrow before Gatwick and London City; `keywords` are alternative names, so "Tokyo" finds Narita. To refresh it:
 
 ```bash
-npm run airports                       # downloads the CSV
-npm run airports -- path/to/airports.csv
+npm run airports                                        # downloads both files
+npm run airports -- path/to/airports.csv path/to/routes.dat
 ```
 
 The dataset is code-split and loaded on first use (~105 kB gzipped).
@@ -78,7 +81,8 @@ npm run routes -- path/to/routes.dat
 
 ```
 src/
-├── main.js            App controller: form state, URL (path + query), wiring
+├── main.js            Planner controller: form state, URL (path + query), wiring
+├── home.js            Home page search
 ├── analytics.js       Vercel Web Analytics
 ├── lib/               Pure logic (no DOM), covered by test/
 │   ├── geo.js         Great-circle route, distance, bearing
